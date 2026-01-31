@@ -2,10 +2,8 @@
 #define TRITONNVIDIAGPU_ATTRDEFS
 
 include "mlir/IR/AttrTypeBase.td"
-include "mlir/IR/EnumAttr.td"
 include "triton/Dialect/TritonNvidiaGPU/IR/TritonNvidiaGPUDialect.td"
 include "triton/Dialect/Triton/IR/TritonInterfaces.td"
-include "mlir/IR/EnumAttr.td"
 
 def TTG_TensorMemorySpace : AttrDef<TritonNvidiaGPU_Dialect, "TensorMemorySpace"> {
   let mnemonic = "tensor_memory";
@@ -33,39 +31,21 @@ def TTG_TensorMemorySpace : AttrDef<TritonNvidiaGPU_Dialect, "TensorMemorySpace"
   }];
 }
 
-def TTNG_TMEMLoadReduceModifierAttr : I32EnumAttr<
-    "TMEMLoadReduceModifier", "",
-    [
-        I32EnumAttrCase<"MIN", 1, "min">,
-        I32EnumAttrCase<"MAX", 2, "max">,
-    ]> {
-    let cppNamespace = "::mlir::triton::nvidia_gpu";
-    let genSpecializedAttr = 0;
-}
-def TTNG_TMEMLoadReduceModifierEnum : EnumAttr<TritonNvidiaGPU_Dialect, TTNG_TMEMLoadReduceModifierAttr, "redOp"> {
-  let assemblyFormat = "`<` $value `>`";
-}
-
 def TTG_TensorMemoryEncodingAttr : AttrDef<TritonNvidiaGPU_Dialect, "TensorMemoryEncoding"> {
   let mnemonic = "tensor_memory_encoding";
   let attrName = "triton.gpu.tensor_memory_encoding";
   let description = [{
     An encoding to represent the different way the tensor memory is laid out.
-    `colStride` describes the stride in elements along the column dimension,
-    that is, the stride between two elements in the same row.
-    When colStride is 1 the tensor memory is packed. When colStride > 1, the
-    tensor memory between elements is undefined.
-    `twoCTAs` indicates that the tensor memory is laid out for twoCTA mode,
-    i.e., `cta_group::2`.
+    `unpacked` attributes indicates whether types smaller than 32bits are unpacked (take full 32bits)
+    or are packed (N elements are stored within one 32bits row).
   }];
   let parameters = (
     ins
     "unsigned":$blockM,
     "unsigned":$blockN,
-    "unsigned":$colStride,
+    "bool":$unpacked,
     DefaultValuedParameter<"unsigned", "1">:$CTASplitM,
-    DefaultValuedParameter<"unsigned", "1">:$CTASplitN,
-    DefaultValuedParameter<"bool", "false">:$twoCTAs
+    DefaultValuedParameter<"unsigned", "1">:$CTASplitN
   );
   let genVerifyDecl = 1;
   let assemblyFormat = "`<` struct(params) `>`";

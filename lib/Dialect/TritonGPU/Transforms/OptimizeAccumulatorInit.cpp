@@ -171,6 +171,18 @@ findZeroInitOp(Value accUse, scf::ForOp forOp, bool &loopArgIsZero) {
   return std::nullopt;
 }
 
+std::optional<bool> getBoolFromConstant(Value cst) {
+  auto constantOp = cst.getDefiningOp<arith::ConstantOp>();
+  if (!constantOp) {
+    return std::nullopt;
+  }
+  assert(constantOp.getValue());
+  if (auto boolAttr = dyn_cast<BoolAttr>(constantOp.getValue())) {
+    return boolAttr.getValue();
+  }
+  return std::nullopt;
+}
+
 } // namespace
 
 class OptimizeAccumulatorInitPass
@@ -203,9 +215,9 @@ public:
       rewriter.setInsertionPoint(forOp);
 
       Value vTrue =
-          arith::ConstantOp::create(rewriter, loc, rewriter.getBoolAttr(true));
+          rewriter.create<arith::ConstantOp>(loc, rewriter.getBoolAttr(true));
       Value vFalse =
-          arith::ConstantOp::create(rewriter, loc, rewriter.getBoolAttr(false));
+          rewriter.create<arith::ConstantOp>(loc, rewriter.getBoolAttr(false));
 
       // Find the accumulator
       auto [accUse, accDef] = getAccumulatorUseAndDef(mmaOp);
@@ -271,8 +283,8 @@ public:
         rewriter.setInsertionPoint(zeroInitOp->first);
         bool zeroingBeforeMMA = zeroInitOp->first->isBeforeInBlock(mmaOp);
         Value prevFlagValue = zeroingBeforeMMA ? loopArgFlagValue : vTrue;
-        auto selectFlagOp = arith::SelectOp::create(
-            rewriter, loc, condition, thenInitsToZero ? vFalse : prevFlagValue,
+        auto selectFlagOp = rewriter.create<arith::SelectOp>(
+            loc, condition, thenInitsToZero ? vFalse : prevFlagValue,
             thenInitsToZero ? prevFlagValue : vFalse);
         setUseAccFlag(mmaOp,
                       zeroingBeforeMMA ? selectFlagOp : loopArgFlagValue);

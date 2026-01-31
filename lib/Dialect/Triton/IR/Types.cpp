@@ -9,8 +9,6 @@
 using namespace mlir;
 using namespace mlir::triton;
 
-#include "triton/Dialect/Triton/IR/TypeInterfaces.cpp.inc"
-
 #define GET_TYPEDEF_CLASSES
 #include "triton/Dialect/Triton/IR/Types.cpp.inc"
 

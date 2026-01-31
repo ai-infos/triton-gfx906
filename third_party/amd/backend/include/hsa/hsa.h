@@ -112,7 +112,7 @@
 extern "C" {
 #endif  /* __cplusplus */
 
-/** \addtogroup error-codes Error codes
+/** \defgroup status Runtime Notifications
  *  @{
  */
 
@@ -802,22 +802,18 @@ typedef enum {
  * @brief Hardware device type.
  */
 typedef enum {
-  /**
-   * CPU device.
-   */
-  HSA_DEVICE_TYPE_CPU = 0,
-  /**
-   * GPU device.
-   */
-  HSA_DEVICE_TYPE_GPU = 1,
-  /**
-   * DSP device.
-   */
-  HSA_DEVICE_TYPE_DSP = 2,
-  /**
-   * AI Engine (AIE) device.
-   */
-  HSA_DEVICE_TYPE_AIE = 3
+    /**
+     * CPU device.
+     */
+    HSA_DEVICE_TYPE_CPU = 0,
+    /**
+     * GPU device.
+     */
+    HSA_DEVICE_TYPE_GPU = 1,
+    /**
+     * DSP device.
+     */
+    HSA_DEVICE_TYPE_DSP = 2
 } hsa_device_type_t;
 
 /**
@@ -2957,23 +2953,18 @@ typedef enum {
  * @brief AQL kernel dispatch packet
  */
 typedef struct hsa_kernel_dispatch_packet_s {
-  union {
-    struct {
-        /**
-         * Packet header. Used to configure multiple packet parameters such as the
-         * packet type. The parameters are described by ::hsa_packet_header_t.
-         */
-        uint16_t header;
+  /**
+   * Packet header. Used to configure multiple packet parameters such as the
+   * packet type. The parameters are described by ::hsa_packet_header_t.
+   */
+  uint16_t header;
 
-        /**
-         * Dispatch setup parameters. Used to configure kernel dispatch parameters
-         * such as the number of dimensions in the grid. The parameters are described
-         * by ::hsa_kernel_dispatch_packet_setup_t.
-         */
-        uint16_t setup;
-    };
-    uint32_t full_header;
-  };
+  /**
+   * Dispatch setup parameters. Used to configure kernel dispatch parameters
+   * such as the number of dimensions in the grid. The parameters are described
+   * by ::hsa_kernel_dispatch_packet_setup_t.
+   */
+  uint16_t setup;
 
   /**
    * X dimension of work-group, in work-items. Must be greater than 0.
@@ -3274,12 +3265,7 @@ typedef enum {
 /**
  * @brief Attributes of a memory region.
  */
-
-#ifdef __cplusplus
-typedef enum : int {
-#else
 typedef enum {
-#endif
   /**
    * Segment where memory in the region can be used. The type of this
    * attribute is ::hsa_region_segment_t.
@@ -3608,7 +3594,7 @@ typedef struct hsa_isa_s {
  * @brief Retrieve a reference to an instruction set architecture handle out of
  * a symbolic name.
  *
- * @param[in] name Vendor-specific name associated with a a particular
+ * @param[in] name Vendor-specific name associated with a particular
  * instruction set architecture. @p name must start with the vendor name and a
  * colon (for example, "AMD:"). The rest of the name is vendor-specific. Must be
  * a NUL-terminated string.

@@ -8,8 +8,6 @@
 
 #endif
 
-// tt-linker-backend: {backend_name}
-
 void unload_{kernel_name}(void);
 void load_{kernel_name}(void);
 // tt-linker: {kernel_name}:{full_signature}:{algo_info}

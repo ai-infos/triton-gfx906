@@ -7,6 +7,7 @@
 #include "triton/Dialect/Triton/IR/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/LayoutUtility.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
@@ -54,28 +55,26 @@ public:
     // the vec and maxPhase for the YType, hence it would causing incorrect
     // swizzling code.
     auto ctx = getContext();
-    auto oldCGALayout = triton::gpu::getCGALayout(srcTy.getEncoding());
-    auto newLl =
-        transposeLinearLayout(oldCGALayout.getLinearLayout(), trans.getOrder());
-    auto newCGALayout = CGAEncodingAttr::get(ctx, std::move(newLl));
+    auto oldCTALayout = triton::gpu::getCTALayout(srcTy.getEncoding());
+    auto newCTALayout = permuteCTALayout(ctx, oldCTALayout, trans.getOrder());
     auto newInnerCvtEnc =
         SwizzledSharedEncodingAttr::get(ctx, cvtEncoding, srcTy.getShape(),
                                         /*order=*/getOrderForMemory(srcTy),
-                                        newCGALayout, srcTy.getElementType(),
+                                        newCTALayout, srcTy.getElementType(),
                                         /*needTrans=*/true);
     if (newInnerCvtEnc == cvtEncoding)
       return failure();
     rewriter.setInsertionPoint(trans);
     auto sharedMemorySpace = SharedMemorySpaceAttr::get(getContext());
-    auto alloc = LocalAllocOp::create(
-        rewriter, trans.getLoc(),
+    auto alloc = rewriter.create<LocalAllocOp>(
+        trans.getLoc(),
         MemDescType::get(srcTy.getShape(), srcTy.getElementType(),
                          newInnerCvtEnc, sharedMemorySpace),
         trans.getSrc());
-    auto newTrans = MemDescTransOp::create(rewriter, trans.getLoc(), alloc,
-                                           ArrayRef<int32_t>({1, 0}));
+    auto newTrans = rewriter.create<MemDescTransOp>(trans.getLoc(), alloc,
+                                                    ArrayRef<int32_t>({1, 0}));
     auto localLoadOp =
-        LocalLoadOp::create(rewriter, trans.getLoc(), sharedLoadTy, newTrans);
+        rewriter.create<LocalLoadOp>(trans.getLoc(), sharedLoadTy, newTrans);
     rewriter.modifyOpInPlace(cvtOp, [&]() {
       cvtOp.getSrcMutable().assign(localLoadOp.getResult());
     });
@@ -111,21 +110,33 @@ public:
     auto allocEncoding = cast<NVMMASharedEncodingAttr>(allocType.getEncoding());
     RankedTensorType srcTy = trans.getSrc().getType();
 
-    auto ctx = getContext();
-    Dialect &dialect = allocEncoding.getDialect();
-    auto inferLayoutInterface = cast<DialectInferLayoutInterface>(&dialect);
-    Attribute newInnerEnc;
-    if (failed(inferLayoutInterface->inferTransOpEncoding(
-            allocEncoding, srcTy.getShape(), trans.getOrder(), newInnerEnc,
-            allocOp.getLoc()))) {
-      return failure();
+    // MMAv3 with transpose only supports f16 and bf16.  Fall back to MMAv3
+    // without transpose for other data types.)
+    auto newInnerCvtOrder = getOrderForMemory(srcTy);
+    if (auto cvt = trans.getSrc().getDefiningOp<ConvertLayoutOp>()) {
+      newInnerCvtOrder = getOrderForMemory(cvt.getSrc().getType());
     }
+    auto srcElemTy = allocType.getElementType();
+    if (!srcElemTy.isF16() && !srcElemTy.isBF16()) {
+      if (allocOp.getResult() == dot->getOperand(0)) {
+        newInnerCvtOrder = {0, 1};
+      } else if (allocOp.getResult() == dot->getOperand(1)) {
+        newInnerCvtOrder = {1, 0};
+      }
+    }
+
+    auto ctx = getContext();
+    auto newCTALayout =
+        permuteCTALayout(ctx, allocEncoding.getCTALayout(), {1, 0});
+    auto newInnerEnc = NVMMASharedEncodingAttr::get(
+        getContext(), srcTy.getShape(), newInnerCvtOrder, newCTALayout,
+        srcTy.getElementType(), allocEncoding.getFp4Padded());
 
     MemDescType innerTy =
         MemDescType::get(srcTy.getShape(), srcTy.getElementType(), newInnerEnc,
                          allocType.getMemorySpace());
-    auto newAlloc = LocalAllocOp::create(rewriter, allocOp.getLoc(), innerTy,
-                                         trans.getSrc());
+    auto newAlloc = rewriter.create<LocalAllocOp>(allocOp.getLoc(), innerTy,
+                                                  trans.getSrc());
     rewriter.replaceOpWithNewOp<MemDescTransOp>(allocOp, newAlloc,
                                                 ArrayRef<int32_t>({1, 0}));
     return success();
@@ -166,14 +177,8 @@ public:
             getContext(), allocOp.getLoc(), allocType, srcShape, innerTy)))
       return failure();
 
-    // For now don't apply the transformation if the new encoding is not an
-    // MMAv3/v5 encoding as it may not be compatible with the user.
-    // The heuristic can be refined once we have more flexible mma ops.
-    if (!isa<NVMMASharedEncodingAttr>(innerTy.getEncoding()))
-      return failure();
-
-    auto newAlloc = LocalAllocOp::create(rewriter, allocOp.getLoc(), innerTy,
-                                         reshapeOp.getSrc());
+    auto newAlloc = rewriter.create<LocalAllocOp>(allocOp.getLoc(), innerTy,
+                                                  reshapeOp.getSrc());
     rewriter.replaceOpWithNewOp<MemDescReshapeOp>(allocOp, allocOp.getType(),
                                                   newAlloc);
     return success();
@@ -264,24 +269,7 @@ private:
     if (!isTmemCopyCompatible(localLoad.getSrc().getType(), usesTMAload))
       return failure();
 
-    PatternRewriter::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPoint(tmemAlloc);
-
-    Value shared = localLoad.getSrc();
-
-    Value reshaped5D = MemDescReshapeOp::create(rewriter, reshapeOp5D.getLoc(),
-                                                shared, reshape5DShape);
-    SmallVector<int32_t> transposeOrder32(transposeOrder.begin(),
-                                          transposeOrder.end());
-    Value transposed = MemDescTransOp::create(rewriter, transOp.getLoc(),
-                                              reshaped5D, transposeOrder32);
-    SmallVector<int64_t> scale2DShapeVec(scale2DShape.begin(),
-                                         scale2DShape.end());
-    Value reshaped2D = MemDescReshapeOp::create(rewriter, reshapeOp2D.getLoc(),
-                                                transposed, scale2DShapeVec);
-
-    opOperand.assign(reshaped2D);
-    rewriter.eraseOp(tmemAlloc);
+    opOperand.assign(localLoad.getSrc());
     return success();
   }
 

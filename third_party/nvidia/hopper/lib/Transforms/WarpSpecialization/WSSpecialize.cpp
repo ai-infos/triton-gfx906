@@ -302,7 +302,7 @@ Operation *SpecializeForOp(scf::ForOp forOp, IRMapping &mapping,
   }
   if (createNewYield) {
     auto newYieldOp =
-        scf::YieldOp::create(forBuilder, yieldOp.getLoc(), newYieldOperands);
+        forBuilder.create<scf::YieldOp>(yieldOp.getLoc(), newYieldOperands);
     setAsyncTaskIds(newYieldOp, {asyncTaskId});
   }
 
@@ -396,8 +396,8 @@ void specializeRegion(triton::FuncOp funcOp, unsigned requestedRegisters) {
   ArrayRef<Type> dummyTypes;
   ImplicitLocOpBuilder impB(opList[0]->getLoc(), opList[0]);
   impB.setInsertionPoint(returnOp);
-  auto wsOp = ttg::WarpSpecializeOp::create(impB, dummyTypes, partitionNumWarps,
-                                            nTaskIds.size() - 1);
+  auto wsOp = impB.create<ttg::WarpSpecializeOp>(dummyTypes, partitionNumWarps,
+                                                 nTaskIds.size() - 1);
 
   // Clone all operations into the corresponding if blocks. If the operation
   // has multiple taskIds, it will be cloned for multiple if blocks.
@@ -415,7 +415,7 @@ void specializeRegion(triton::FuncOp funcOp, unsigned requestedRegisters) {
       SpecializeOp(op, mapping, taskBuilder, asyncTaskId);
     }
     SmallVector<Value> opnds;
-    ttg::WarpYieldOp::create(taskBuilder, loc, opnds);
+    taskBuilder.create<ttg::WarpYieldOp>(loc, opnds);
   }
 
   unsigned idx = 1;
@@ -433,7 +433,7 @@ void specializeRegion(triton::FuncOp funcOp, unsigned requestedRegisters) {
     for (Operation *op : opList) {
       SpecializeOp(op, mapping, taskBuilder, asyncTaskId);
     }
-    ttg::WarpReturnOp::create(taskBuilder, loc);
+    taskBuilder.create<ttg::WarpReturnOp>(loc);
     auto regAlloc =
         scanRegUsage(partitionBlock, asyncTaskId, requestedRegisters);
     estRegUsage.push_back(regAlloc);
@@ -463,8 +463,7 @@ void specializeRegion(triton::FuncOp funcOp, unsigned requestedRegisters) {
                         "FIXME: capturing tensor values into warp "
                         "partitions is not supported");
     }
-    auto partOp = wsOp.getPartitionOp();
-    partOp->insertOperands(partOp.getNumOperands(), capture);
+    wsOp->insertOperands(wsOp.getNumOperands(), capture);
     for (Region *region : wsOp.getPartitionRegions()) {
       // Does this include default region?
       BlockArgument arg =

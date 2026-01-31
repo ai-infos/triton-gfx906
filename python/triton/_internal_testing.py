@@ -43,11 +43,7 @@ def is_ampere_or_newer():
 
 
 def is_blackwell():
-    return is_cuda() and torch.cuda.get_device_capability()[0] in [10, 11]
-
-
-def is_blackwell_ultra():
-    return is_cuda() and torch.cuda.get_device_capability()[0:2] == (10, 3)
+    return is_cuda() and torch.cuda.get_device_capability()[0] == 10
 
 
 def is_hopper_or_newer():
@@ -56,10 +52,6 @@ def is_hopper_or_newer():
 
 def is_hopper():
     return is_cuda() and torch.cuda.get_device_capability()[0] == 9
-
-
-def is_sm12x():
-    return is_cuda() and torch.cuda.get_device_capability()[0] == 12
 
 
 def is_hip():
@@ -82,27 +74,18 @@ def is_hip_cdna4():
     return target is not None and target.backend == 'hip' and target.arch == 'gfx950'
 
 
-def is_hip_rdna3():
+def is_hip_gfx11():
     target = get_current_target()
     return target is not None and target.backend == 'hip' and 'gfx11' in target.arch
 
 
-def is_hip_rdna4():
+def is_hip_gfx12():
     target = get_current_target()
     return target is not None and target.backend == 'hip' and 'gfx12' in target.arch
 
 
-def is_hip_gfx1250():
-    target = get_current_target()
-    return target is not None and target.backend == 'hip' and 'gfx1250' in target.arch
-
-
 def is_hip_cdna():
     return is_hip_cdna2() or is_hip_cdna3() or is_hip_cdna4()
-
-
-def is_hip_rdna():
-    return is_hip_rdna3() or is_hip_rdna4()
 
 
 def get_hip_lds_size():
@@ -204,14 +187,6 @@ def supports_tma(byval_only=False):
     cuda_version_tuple = tuple(map(int, cuda_version.split(".")))
     assert len(cuda_version_tuple) == 2, cuda_version_tuple
     return torch.cuda.get_device_capability()[0] >= 9 and cuda_version_tuple >= min_cuda_version
-
-
-def supports_ws():
-    if is_interpreter():
-        return True
-    if not is_cuda():
-        return False
-    return torch.cuda.get_device_capability()[0] >= 9
 
 
 def tma_skip_msg(byval_only=False):

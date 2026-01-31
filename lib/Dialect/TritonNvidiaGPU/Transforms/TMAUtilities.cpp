@@ -1,67 +1,71 @@
 #include <triton/Dialect/TritonNvidiaGPU/IR/Dialect.h>
 #include <triton/Dialect/TritonNvidiaGPU/Transforms/TMAUtilities.h>
-#include <triton/Tools/LayoutUtils.h>
 
 namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
 
 namespace mlir::triton::nvidia_gpu {
 
-ttg::CGAEncodingAttr updateCGALayoutForShape(ttg::CGAEncodingAttr cgaLayout,
-                                             ArrayRef<int64_t> shape) {
-  auto rank = shape.size();
-  if (cgaLayout.getRank() == rank)
-    return cgaLayout;
+SmallVector<Value> translateTMAIndices(OpBuilder &builder, Location loc,
+                                       Attribute encoding,
+                                       SmallVector<Value> indices) {
+  if (isFp4Padded(encoding)) {
+    auto two = builder.create<arith::ConstantIntOp>(loc, 2, 32);
+    indices.back() = builder.create<arith::MulIOp>(loc, indices.back(), two);
+  }
+  return indices;
+}
 
-  auto ctx = cgaLayout.getContext();
-  if (cgaLayout.getRank() > rank) {
-    auto ll = cgaLayout.getLinearLayout();
-    // Broadcast over the first rankDiff dims
-    unsigned rankDiff = cgaLayout.getRank() - rank;
-    for (int i = 0; i < rankDiff; ++i) {
-      ll = removeStandardDim(ll, 0);
-    }
-    return ttg::CGAEncodingAttr::get(ctx, std::move(ll));
+ttg::CTALayoutAttr updateCTALayoutForShape(ttg::CTALayoutAttr ctaLayout,
+                                           ArrayRef<int64_t> shape) {
+  auto rank = shape.size();
+  if (ctaLayout.getRank() == rank)
+    return ctaLayout;
+
+  auto ctx = ctaLayout.getContext();
+  if (ctaLayout.getRank() > rank) {
+    unsigned rankDiff = ctaLayout.getRank() - rank;
+    return ttg::CTALayoutAttr::get(
+        ctx, ctaLayout.getCTAsPerCGA().drop_front(rankDiff),
+        ctaLayout.getCTASplitNum().drop_front(rankDiff),
+        ctaLayout.getCTAOrder().drop_front(rankDiff));
   }
   // For rank-reducing loads, we need to rank-increase the CTA Layout
-  auto rankDiff = rank - cgaLayout.getRank();
+  auto rankDiff = rank - ctaLayout.getRank();
   for (unsigned i = 0; i < rankDiff; ++i) {
     assert(shape[i] == 1 && "Should only happen for rank-reducing loads");
   }
-  auto ll = cgaLayout.getLinearLayout();
-  auto kBlock = *ll.getInDimNames().begin();
-  auto standardOuts = standardOutDimNames(ctx, rank);
-  // Append to front
-  for (int i = cgaLayout.getRank(); i < rank; ++i) {
-    ll = LinearLayout::identity1D(1, kBlock, standardOuts[i]) * ll;
+  SmallVector<unsigned> CTAsPerCGA(rank, 1);
+  SmallVector<unsigned> CTASplitNum(rank, 1);
+  SmallVector<unsigned> CTAOrder(rank, 1);
+
+  llvm::copy(ctaLayout.getCTAsPerCGA(), CTAsPerCGA.begin() + rankDiff);
+  llvm::copy(ctaLayout.getCTASplitNum(), CTASplitNum.begin() + rankDiff);
+  for (unsigned i = 0; i < rankDiff; ++i) {
+    CTAOrder[i] = rank - i;
   }
-  // Rename out dims to dim0..dimn-1
-  auto dimSizes = ll.getOutDims();
-  for (auto [i, dim] : llvm::enumerate(standardOuts)) {
-    dimSizes[i].first = dim;
-  }
-  ll = LinearLayout(ll.getBases(), dimSizes, false);
-  return ttg::CGAEncodingAttr::get(ctx, std::move(ll));
+  llvm::copy(ctaLayout.getCTAOrder(), CTAOrder.begin() + rankDiff);
+  return ttg::CTALayoutAttr::get(ctx, CTAsPerCGA, CTASplitNum, CTAOrder);
 }
 
 ttg::SharedEncodingTrait
 updateEncodingForShape(Operation *op, ttg::SharedEncodingTrait encoding,
                        RankedTensorType tensorType) {
   auto ctx = encoding.getContext();
-  auto cgaLayout = ttg::getCGALayout(encoding);
+  auto ctaLayout = ttg::getCTALayout(encoding);
   if (auto nvmmaEnc = dyn_cast<ttg::NVMMASharedEncodingAttr>(encoding)) {
-    auto existingCga = nvmmaEnc.getCGALayout();
-    if (!existingCga)
+    auto existingCta = nvmmaEnc.getCTALayout();
+    if (!existingCta)
       return nvmmaEnc;
 
-    auto newCgaEnc = updateCGALayoutForShape(cgaLayout, tensorType.getShape());
+    auto newCtaEnc = updateCTALayoutForShape(ctaLayout, tensorType.getShape());
     return ttg::NVMMASharedEncodingAttr::get(
         ctx, nvmmaEnc.getSwizzlingByteWidth(), nvmmaEnc.getTransposed(),
-        nvmmaEnc.getElementBitWidth(), nvmmaEnc.getFp4Padded(), newCgaEnc);
+        nvmmaEnc.getElementBitWidth(), nvmmaEnc.getFp4Padded(), newCtaEnc);
   }
   if (auto swizEnc = dyn_cast<ttg::SwizzledSharedEncodingAttr>(encoding)) {
-    auto existingCga = swizEnc.getCGALayout();
-    if (!existingCga)
+    auto existingCta = swizEnc.getCTALayout();
+    if (!existingCta)
       return swizEnc;
 
     auto rank = tensorType.getRank();
@@ -75,10 +79,10 @@ updateEncodingForShape(Operation *op, ttg::SharedEncodingTrait encoding,
         continue;
       order.push_back(oldOrder[i]);
     }
-    auto newCgaEnc = updateCGALayoutForShape(cgaLayout, tensorType.getShape());
+    auto newCtaEnc = updateCTALayoutForShape(ctaLayout, tensorType.getShape());
     return ttg::SwizzledSharedEncodingAttr::get(
         ctx, swizEnc.getVec(), swizEnc.getPerPhase(), swizEnc.getMaxPhase(),
-        order, newCgaEnc);
+        order, newCtaEnc);
   }
 
   constexpr auto msg = "Internal Error: Unhandled tensor descriptor encoding";
@@ -106,7 +110,36 @@ ttg::SharedEncodingTrait getEncodingFromDescriptor(Operation *op,
   return updateEncodingForShape(op, sharedEnc, tensorType);
 }
 
-FailureOr<int> getTMASwizzleMode(Location loc, TensorDescType ty) {
+SmallVector<int64_t> getTMABlockShape(ArrayRef<int64_t> shapePerCTA,
+                                      int elementBitWidth, int swizzleBytes,
+                                      bool fp4Padded, bool isTransposed,
+                                      bool packedSize) {
+  SmallVector<int64_t> blockShape(shapePerCTA);
+  int contigDim = isTransposed ? 0 : blockShape.size() - 1;
+  if (fp4Padded) {
+    blockShape[contigDim] *= 2;
+  }
+  // All dimensions must be at most 256
+  constexpr int64_t dimMax = 256;
+  for (auto &size : blockShape) {
+    size = std::min(size, dimMax);
+  }
+  // Last dim must equal the swizzle byte size
+  if (swizzleBytes != 0) {
+    auto contigDimSize = (8 * swizzleBytes) / elementBitWidth;
+    if (blockShape[contigDim] < contigDimSize) {
+      llvm::report_fatal_error("Block shape is too small for the swizzle byte "
+                               "size in NVMMA Shared Layout.");
+    }
+    blockShape[contigDim] = contigDimSize;
+  }
+  if (fp4Padded && packedSize) {
+    blockShape[contigDim] /= 2;
+  }
+  return blockShape;
+}
+
+std::optional<int> getTMASwizzleMode(Operation *op, TensorDescType ty) {
   auto encoding = ty.getBlockType().getEncoding();
   auto mmaEncoding = dyn_cast<ttg::NVMMASharedEncodingAttr>(encoding);
   unsigned swizzleBytes = mmaEncoding ? mmaEncoding.getSwizzlingByteWidth() : 0;
@@ -114,18 +147,15 @@ FailureOr<int> getTMASwizzleMode(Location loc, TensorDescType ty) {
     auto swizzledEnc = dyn_cast<ttg::SwizzledSharedEncodingAttr>(encoding);
     if (!swizzledEnc || swizzledEnc.getVec() != 1 ||
         swizzledEnc.getPerPhase() != 1 || swizzledEnc.getMaxPhase() != 1) {
-      return emitError(loc)
-             << "unhandled shared memory layout for TMA descriptor: "
-             << encoding;
+      if (op)
+        op->emitError("Unhandled encoding type");
+      return std::nullopt;
     }
   }
 
   bool fp4Padded = isFp4Padded(encoding);
-  if (fp4Padded && swizzleBytes != 128) {
-    return emitError(loc) << "fp4 padded operands (elem type .b4x16_p64) only "
-                             "supports 128-byte swizzling, but got "
-                          << swizzleBytes;
-  }
+  assert(!fp4Padded || swizzleBytes == 128 &&
+                           "elem type .b4x16_p64 supports only 128B swizzling");
 
   int32_t swizzleMode = 0;
   if (swizzleBytes == 128) {
@@ -160,7 +190,7 @@ enum TMA_ELEMENT_TYPES {
   TMA_B6P2X16 = 15,
 };
 
-FailureOr<int> getTMAElementType(Location loc, TensorDescType ty) {
+std::optional<int> getTMAElementType(Operation *op, TensorDescType ty) {
   auto encoding = ty.getBlockType().getEncoding();
   auto mmaEncoding = dyn_cast<ttg::NVMMASharedEncodingAttr>(encoding);
   bool fp4Padded = isFp4Padded(encoding);
@@ -192,9 +222,12 @@ FailureOr<int> getTMAElementType(Location loc, TensorDescType ty) {
   default:
     break;
   }
-  return emitError(loc)
-         << "Tensor descriptor element type must have size 1, 2, or 4 but got "
-         << elemSize;
+  if (op) {
+    op->emitError()
+        << "Tensor descriptor element type must have size 1, 2, or 4 but got "
+        << elemSize;
+  }
+  return std::nullopt;
 }
 
 LogicalResult createTMADesc(Value tmaPtr, MakeTensorDescOp op,
@@ -203,8 +236,8 @@ LogicalResult createTMADesc(Value tmaPtr, MakeTensorDescOp op,
   MLIRContext *ctx = op.getContext();
   auto loc = op.getLoc();
   auto mkI32Constant = [&](int32_t val) {
-    return arith::ConstantOp::create(builder, loc, builder.getI32Type(),
-                                     builder.getI32IntegerAttr(val));
+    return builder.create<arith::ConstantOp>(loc, builder.getI32Type(),
+                                             builder.getI32IntegerAttr(val));
   };
 
   auto elemType = op.getBase().getType().getPointeeType();
@@ -240,13 +273,13 @@ LogicalResult createTMADesc(Value tmaPtr, MakeTensorDescOp op,
     }
   }
 
-  auto maybeSwizzleMode = getTMASwizzleMode(loc, op.getType());
-  if (failed(maybeSwizzleMode))
+  auto maybeSwizzleMode = getTMASwizzleMode(op, op.getType());
+  if (!maybeSwizzleMode)
     return failure();
   auto swizzleMode = *maybeSwizzleMode;
 
-  Value elemSizeVal = arith::ConstantOp::create(
-      builder, loc, builder.getI64Type(), builder.getI64IntegerAttr(elemSize));
+  Value elemSizeVal = builder.create<arith::ConstantOp>(
+      loc, builder.getI64Type(), builder.getI64IntegerAttr(elemSize));
 
   SmallVector<Value> globalDim(llvm::reverse(op.getShape()));
   SmallVector<Value> globalStride;
@@ -257,23 +290,24 @@ LogicalResult createTMADesc(Value tmaPtr, MakeTensorDescOp op,
   if (fp4Padded) {
     // Convert number of bytes to number of mxfp4 elements
     globalDim[0] =
-        arith::MulIOp::create(builder, loc, globalDim[0], mkI32Constant(2));
+        builder.create<arith::MulIOp>(loc, globalDim[0], mkI32Constant(2));
   }
 
   SmallVector<Value> elementStride(globalDim.size(), mkI32Constant(1));
 
   for (int i = 0; i < globalStride.size(); ++i)
     globalStride[i] =
-        arith::MulIOp::create(builder, loc, globalStride[i], elemSizeVal);
+        builder.create<arith::MulIOp>(loc, globalStride[i], elemSizeVal);
 
-  auto elemTypeEnum = getTMAElementType(loc, op.getType());
-  if (failed(elemTypeEnum))
+  auto elemTypeEnum = getTMAElementType(op, op.getType());
+  if (!elemTypeEnum) {
     return failure();
+  }
 
   auto fillMode = (op.getPadding() == triton::PaddingOption::PAD_NAN) ? 1 : 0;
 
-  TensormapCreateOp::create(
-      builder, loc,
+  builder.create<TensormapCreateOp>(
+      loc,
       /*desc_ptr=*/tmaPtr,
       /*global_address=*/op.getBase(),
       /*box_dim=*/boxDim,

@@ -6,6 +6,16 @@ namespace proton {
 
 namespace cupti {
 
+struct ExternLibCupti : public ExternLibBase {
+  using RetType = CUptiResult;
+  static constexpr const char *name = "libcupti.so";
+  static inline std::string defaultDir = "";
+  static constexpr RetType success = CUPTI_SUCCESS;
+  static void *lib;
+};
+
+void *ExternLibCupti::lib = nullptr;
+
 DEFINE_DISPATCH(ExternLibCupti, getVersion, cuptiGetVersion, uint32_t *);
 
 DEFINE_DISPATCH(ExternLibCupti, getContextId, cuptiGetContextId, CUcontext,
@@ -55,9 +65,6 @@ DEFINE_DISPATCH(ExternLibCupti, activityPopExternalCorrelationId,
 DEFINE_DISPATCH(ExternLibCupti, activitySetAttribute, cuptiActivitySetAttribute,
                 CUpti_ActivityAttribute, size_t *, void *)
 
-DEFINE_DISPATCH(ExternLibCupti, activityEnableHWTrace,
-                cuptiActivityEnableHWTrace, uint8_t)
-
 DEFINE_DISPATCH(ExternLibCupti, unsubscribe, cuptiUnsubscribe,
                 CUpti_SubscriberHandle)
 
@@ -68,9 +75,6 @@ DEFINE_DISPATCH(ExternLibCupti, getGraphExecId, cuptiGetGraphExecId,
 
 DEFINE_DISPATCH(ExternLibCupti, getGraphId, cuptiGetGraphId, CUgraph,
                 uint32_t *);
-
-DEFINE_DISPATCH(ExternLibCupti, getGraphNodeId, cuptiGetGraphNodeId,
-                CUgraphNode, uint64_t *);
 
 DEFINE_DISPATCH(ExternLibCupti, getCubinCrc, cuptiGetCubinCrc,
                 CUpti_GetCubinCrcParams *);
@@ -105,6 +109,8 @@ DEFINE_DISPATCH(ExternLibCupti, pcSamplingStart, cuptiPCSamplingStart,
 
 DEFINE_DISPATCH(ExternLibCupti, pcSamplingStop, cuptiPCSamplingStop,
                 CUpti_PCSamplingStopParams *);
+
+void setLibPath(const std::string &path) { ExternLibCupti::defaultDir = path; }
 
 } // namespace cupti
 

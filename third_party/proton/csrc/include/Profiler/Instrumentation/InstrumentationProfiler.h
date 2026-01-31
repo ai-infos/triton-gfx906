@@ -5,7 +5,7 @@
 #include "Device.h"
 #include "Metadata.h"
 #include "Profiler/Profiler.h"
-#include "Runtime/Runtime.h"
+#include "Runtime.h"
 #include "TraceDataIO/Parser.h"
 #include "Utility/Singleton.h"
 
@@ -19,17 +19,13 @@ public:
   InstrumentationProfiler() = default;
   virtual ~InstrumentationProfiler();
 
+  InstrumentationProfiler *setMode(const std::vector<std::string> &mode);
+
 protected:
   // Profiler
   virtual void doStart() override;
   virtual void doFlush() override;
   virtual void doStop() override;
-  virtual void
-  doSetMode(const std::vector<std::string> &modeAndOptions) override;
-  virtual void doAddMetrics(
-      size_t scopeId,
-      const std::map<std::string, MetricValueType> &scalarMetrics,
-      const std::map<std::string, TensorMetric> &tensorMetrics) override;
 
   // InstrumentationInterface
   void initFunctionMetadata(
@@ -44,17 +40,18 @@ protected:
 
   // OpInterface
   void startOp(const Scope &scope) override {
-    for (auto data : dataSet) {
-      dataToEntryMap.insert_or_assign(data, data->addOp(scope.name));
+    for (auto data : getDataSet()) {
+      auto scopeId = data->addOp(scope.scopeId, scope.name);
+      dataScopeIdMap[data] = scopeId;
     }
   }
-  void stopOp(const Scope &scope) override { dataToEntryMap.clear(); }
+  void stopOp(const Scope &scope) override { dataScopeIdMap.clear(); }
 
 private:
   std::shared_ptr<ParserConfig> getParserConfig(uint64_t functionId,
                                                 size_t bufferSize) const;
 
-  Runtime *runtime;
+  std::unique_ptr<Runtime> runtime;
   // device -> deviceStream
   std::map<void *, void *> deviceStreams;
   std::map<std::string, std::string> modeOptions;
@@ -70,7 +67,7 @@ private:
   // functionId -> metadata
   std::map<uint64_t, InstrumentationMetadata> functionMetadata;
   // data -> scopeId
-  DataToEntryMap dataToEntryMap;
+  static thread_local std::map<Data *, size_t> dataScopeIdMap;
 };
 
 } // namespace proton

@@ -194,23 +194,11 @@ public:
           // overlap. WS does not have this problem because the MMA is placed in
           // a different partition than the MMA, so we can correctly set the
           // latency.
-          if (isWarpSpecialized(forOp)) {
+          if (forOp->hasAttr(kWarpSpecializeAttrName)) {
             if (ttng::hasAccReadModifyWrite(mma, forOp))
               opLatency.erase(&op); // can't pipeline the MMA
             else
               opLatency[&op] += 1;
-            // If all inputs to the MMA are warp specialized, set the self
-            // latency to 0 since the MMA won't need to wait on itself.
-            auto cantWarpSpec = [](Operation *op) { return isa<LoadOp>(op); };
-            auto warpSpecHelper = ttng::MMAv5PipelineableOperandsHelper(
-                mma, forOp, [&](Operation *op) {
-                  return isLoadToBePipelined(op) && !cantWarpSpec(op);
-                });
-            if (warpSpecHelper.isPipelineable ||
-                (warpSpecHelper.isOperandsStateDetermined &&
-                 llvm::none_of(warpSpecHelper.unpipelineableOperandDefs,
-                               cantWarpSpec)))
-              mmaSelfLatency[mma] = 0;
           }
         }
       }
@@ -229,17 +217,6 @@ private:
     }
     return false;
   }
-
-  bool isWarpSpecialized(scf::ForOp forOp) {
-    scf::ForOp current = forOp;
-    do {
-      if (current->hasAttr(kWarpSpecializeAttrName)) {
-        return true;
-      }
-      current = current->getParentOfType<scf::ForOp>();
-    } while (current);
-    return false;
-  };
 };
 
 // Discover operations that should become async and assign latencies to them

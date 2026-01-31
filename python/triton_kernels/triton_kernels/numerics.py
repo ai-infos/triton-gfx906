@@ -1,8 +1,6 @@
 import torch
 from dataclasses import dataclass
 
-# ------ global scaling -------
-
 MAX_FINITE_FLOAT8E5 = 57344.0
 MAX_FINITE_FLOAT8E4NV = 448.0
 MAX_FINITE_FLOAT8E4B8 = 240.0
@@ -38,14 +36,7 @@ class OutFlexData(BaseFlexData):
     actual_scale: torch.Tensor | None = None
     checksum_scale: torch.Tensor | None = None
 
-    @property
-    def is_per_batch(self):
-        return False if self.expected_scale is None else len(self.expected_scale) > 1
-
     def __iter__(self):
         yield self.expected_scale
         yield self.actual_scale
         yield self.checksum_scale
-
-
-# ------ block scaling -------

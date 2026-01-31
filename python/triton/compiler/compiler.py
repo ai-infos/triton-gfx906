@@ -122,11 +122,7 @@ class IRSource:
         if self.ext == "ttgir":
             num_warps = self.module.get_int_attr("ttg.num-warps")
             assert num_warps is not None, "Unable to parse ttg.num-warps attribute"
-            options = {'num_warps': num_warps}
-            num_ctas = self.module.get_int_attr("ttg.num-ctas")
-            if num_ctas is not None:
-                options['num_ctas'] = num_ctas
-            return options
+            return {'num_warps': num_warps}
         return dict()
 
 
@@ -244,9 +240,6 @@ def compile(src, target=None, options=None, _env_vars=None):
     # create cache manager
     env_vars = get_cache_invalidating_env_vars() if _env_vars is None else _env_vars
     key = get_cache_key(src, backend, options, env_vars=env_vars)
-    if knobs.runtime.add_stages_inspection_hook is not None:
-        inspect_stages_key, inspect_stages_hash = knobs.runtime.add_stages_inspection_hook()
-        key += inspect_stages_key
     hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
     fn_cache_manager = get_cache_manager(hash)
     # For dumping/overriding only hash the source as we want it to be independent of triton
@@ -354,6 +347,17 @@ def compile(src, target=None, options=None, _env_vars=None):
     metadata_group[metadata_filename] = fn_cache_manager.put(json.dumps(metadata, default=vars), metadata_filename,
                                                              binary=False)
     fn_cache_manager.put_group(metadata_filename, metadata_group)
+    # Compilation completed, disabling multithreading in context.
+    # This is needed to safely finalize threads pool inside context: if current process forks before
+    # python GC deletes context object, thread pool in child process will be invalid, which could
+    # lead to child crash or hang.
+    #
+    # However disabling multithreading causes the code to hang if the ASAN pass is enabled
+    # this is likely due to the llvm-symbolizer forking a process
+    # TODO: Reconcile the difference here between the ASAN and non-ASAN path with enabling
+    # multithreading in the MLIR context
+    if not knobs.compilation.enable_asan:
+        context.disable_multithreading()
 
     # notify any listener
     if compilation_listener:
@@ -410,6 +414,7 @@ class CompiledKernel:
         from collections import namedtuple
         metadata_path = next((Path(p) for c, p in metadata_group.items() if c.endswith(".json")))
         metadata = json.loads(metadata_path.read_text())
+        metadata['cluster_dims'] = tuple(metadata['cluster_dims'])
         # JSON serialization dumps the target as a dict. Restore it to a GPUTarget.
         target = metadata['target']
         metadata['target'] = GPUTarget(target['backend'], target['arch'], target['warp_size'])

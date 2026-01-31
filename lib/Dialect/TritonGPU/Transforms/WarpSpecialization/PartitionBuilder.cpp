@@ -14,8 +14,15 @@ Value PartitionBuilder::boolCst(bool value) {
   return intCst(value, /*width=*/1);
 }
 
+void PartitionBuilder::assignStage(Operation *op, StageCluster stageCluster) {
+  if (stageCluster) {
+    op->setAttr(kLoopStageAttrName, getI32IntegerAttr(stageCluster->first));
+    op->setAttr(kLoopClusterAttrName, getI32IntegerAttr(stageCluster->second));
+  }
+}
+
 void PartitionBuilder::assignPartition(Operation *op, Partition &partition) {
-  setPartition(op, &partition);
+  op->setAttr(kPartitionAttrName, getI32IntegerAttr(partition.getIndex()));
 }
 
 StageCluster triton::gpu::getStageCluster(Operation *op) {
@@ -24,13 +31,4 @@ StageCluster triton::gpu::getStageCluster(Operation *op) {
   if (!stageAttr || !clusterAttr)
     return std::nullopt;
   return std::make_pair(stageAttr.getInt(), clusterAttr.getInt());
-}
-
-void triton::gpu::setStageCluster(OpBuilder &b, Operation *op,
-                                  StageCluster stageCluster) {
-  if (stageCluster) {
-    op->setAttr(kLoopStageAttrName, b.getI32IntegerAttr(stageCluster->first));
-    op->setAttr(kLoopClusterAttrName,
-                b.getI32IntegerAttr(stageCluster->second));
-  }
 }

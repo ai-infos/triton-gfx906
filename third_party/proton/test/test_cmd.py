@@ -1,3 +1,4 @@
+import triton
 import pytest
 import subprocess
 import json
@@ -7,6 +8,10 @@ import pathlib
 def test_help():
     # Only check if the viewer can be invoked
     subprocess.check_call(["proton", "-h"], stdout=subprocess.DEVNULL)
+
+
+def is_hip():
+    return triton.runtime.driver.active.get_current_target().backend == "hip"
 
 
 @pytest.mark.parametrize("mode", ["script", "python", "pytest"])

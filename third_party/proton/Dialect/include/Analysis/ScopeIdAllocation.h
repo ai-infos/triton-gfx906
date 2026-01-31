@@ -23,7 +23,7 @@ public:
   using ScopeIdParent = std::vector<std::pair<ScopeId, ScopeId>>;
 
   ScopeIdAllocation() = default;
-  explicit ScopeIdAllocation(FunctionOpInterface op) : funcOp(op) { run(); }
+  explicit ScopeIdAllocation(Operation *op) : funcOp(op) { run(); }
 
   ScopeId getOpScopeId(Operation *op) const {
     if (auto recordOp = dyn_cast<RecordOp>(op)) {
@@ -45,21 +45,15 @@ public:
   size_t getNumScopes() const { return idToNameMap.size(); }
 
 private:
-  using VirtualBlock = std::pair<Block *, Block::iterator>;
-
   void run();
-  void reachability();
-  void liveness();
-  void dominance();
-  void visitTerminator(Operation *op, SmallVector<VirtualBlock> &successors);
 
-  FunctionOpInterface funcOp;
+  Operation *funcOp;
   llvm::DenseMap<ScopeId, StringRef> idToNameMap;
   llvm::DenseMap<Operation *, ScopeId> opToIdMap;
   ScopeIdParent scopeParentIds;
 };
 
-class ModuleScopeIdAllocation : public triton::CallGraph<ScopeIdAllocation> {
+class ModuleScopeIdAllocation : public CallGraph<ScopeIdAllocation> {
 public:
   using FuncOffsetMapT =
       llvm::DenseMap<FunctionOpInterface, ScopeIdAllocation::ScopeId>;

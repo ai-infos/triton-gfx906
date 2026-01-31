@@ -19,11 +19,9 @@ from .standard import (
     sigmoid,
     softmax,
     sort,
-    squeeze,
     sum,
     swizzle2d,
     topk,
-    unsqueeze,
     xor_sum,
     zeros,
     zeros_like,
@@ -41,6 +39,7 @@ from .core import (
     arange,
     associative_scan,
     assume,
+    async_task,
     atomic_add,
     atomic_and,
     atomic_cas,
@@ -92,7 +91,6 @@ from .core import (
     max_contiguous,
     maximum,
     minimum,
-    mul,
     multiple_of,
     num_programs,
     permute,
@@ -108,9 +106,7 @@ from .core import (
     static_print,
     static_range,
     store,
-    sub,
     tensor,
-    to_tensor,
     trans,
     tuple,
     tuple_type,
@@ -153,6 +149,7 @@ __all__ = [
     "argmin",
     "associative_scan",
     "assume",
+    "async_task",
     "atomic_add",
     "atomic_and",
     "atomic_cas",
@@ -225,7 +222,6 @@ __all__ = [
     "maximum",
     "min",
     "minimum",
-    "mul",
     "multiple_of",
     "num_programs",
     "pair_uniform_to_normal",
@@ -255,18 +251,15 @@ __all__ = [
     "split",
     "sqrt",
     "sqrt_rn",
-    "squeeze",
     "static_assert",
     "static_print",
     "static_range",
     "store",
-    "sub",
     "sum",
     "swizzle2d",
     "target_info",
     "tensor",
     "topk",
-    "to_tensor",
     "trans",
     "tuple",
     "uint16",
@@ -275,7 +268,6 @@ __all__ = [
     "uint8",
     "uint_to_uniform_float",
     "umulhi",
-    "unsqueeze",
     "view",
     "void",
     "where",
@@ -315,17 +307,11 @@ def str_to_ty(name, c):
         stride_type = tuple_type(([int64] * ndim))
         block = block_type(dtype, block_shape)
         if is_gluon:
-            from triton.experimental.gluon.language._layouts import NVMMASharedLayout, PaddedSharedLayout, SwizzledSharedLayout
-            from triton.experimental.gluon.language.nvidia.hopper.tma import tensor_descriptor_type as nvidia_tensor_descriptor_type
-            from triton.experimental.gluon.language.amd.gfx1250.tdm import tensor_descriptor_type as amd_tensor_descriptor_type
-            layout = eval(
-                layout,
-                dict(NVMMASharedLayout=NVMMASharedLayout, PaddedSharedLayout=PaddedSharedLayout,
-                     SwizzledSharedLayout=SwizzledSharedLayout))
-            if isinstance(layout, NVMMASharedLayout):
-                return nvidia_tensor_descriptor_type(block, shape_type, stride_type, layout)
-            else:
-                return amd_tensor_descriptor_type(block, shape_type, stride_type, layout)
+            from triton.experimental.gluon.language._layouts import NVMMASharedLayout
+            from triton.experimental.gluon.language.nvidia.hopper.tma import tensor_descriptor_type as gluon_tensor_descriptor_type
+            layout = eval(layout, dict(NVMMASharedLayout=NVMMASharedLayout))
+            assert isinstance(layout, NVMMASharedLayout)
+            return gluon_tensor_descriptor_type(block, shape_type, stride_type, layout)
         return tensor_descriptor_type(block, shape_type, stride_type)
 
     if name.startswith("constexpr"):

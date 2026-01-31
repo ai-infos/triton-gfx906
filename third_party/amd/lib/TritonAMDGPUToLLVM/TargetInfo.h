@@ -11,9 +11,6 @@ class TargetInfo : public mlir::triton::TargetInfoBase {
 public:
   explicit TargetInfo(std::string arch) : arch(std::move(arch)) {}
 
-  llvm::AMDGPU::IsaVersion getIsaVersion() const;
-
-  StringRef getArch() const { return arch; }
   ISAFamily getISAFamily() const { return deduceISAFamily(arch); }
 
   llvm::AMDGPU::GPUKind getGPUKind() const;
@@ -30,9 +27,7 @@ public:
                Value cmp) const override;
 
   void barrier(Location loc, RewriterBase &rewriter,
-               triton::gpu::AddrSpace targets) const override;
-
-  void warpSync(Location loc, RewriterBase &rewriter) const override;
+               bool isWarpSync = false) const override;
 
   void storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
                     std::optional<Value> ctaId, Value val,
@@ -40,21 +35,7 @@ public:
   Value loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
                     std::optional<Value> ctaId, Type elemTy, Value pred,
                     Operation *localLoadOp = nullptr) const override;
-
-  // Describes the parameters of ds_read_tr for a particular data type
-  struct LDSTransLoadParams {
-    // Number of lanes that cooperate in the instruction
-    unsigned numLanesInShuffleGroup;
-    // Number of bits that each lane reads per issued instruction
-    unsigned instBitWidth;
-    // Number of elements that the instruction needs to be contiguous in LDS
-    unsigned tileSize;
-    // Whether B8 types require double contiguity (for certain architectures)
-    bool needsDoubleB8Contiguity;
-  };
-  // Get the ds_read_tr parameters for the instruction that operates on the
-  // element granularty specified by bitWidth
-  std::optional<LDSTransLoadParams> queryLDSTransLoadParams(int bitWidth) const;
+  bool canUseLDSTransLoad(int bitwidth) const;
 
   Value shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                    int i) const override;
@@ -93,26 +74,7 @@ public:
 
   bool supportVectorizedAtomics() const override;
 
-  // Returns true if the target supports per lane addresses into LDS for
-  // direct-to-lds loads. Some architectures (e.g. GFX9) do not support
-  // scattering and instead have to write warp coalesced into LDS
-  bool supportsDirectToLDSScattering() const;
-
-  // Some architectures (GFX9) require alias information on direct-to-lds loads
-  // and loads from LDS so LLVM does not add conservative waits between those
-  // ops. For such case we ensure syncronization between data hazards via
-  // ttg.async_wait
-  bool requiresAliasInfoForAsyncOps() const;
   bool supportsDirectToLdsLoadBitWidth(int bitWidth) const;
-  bool supportsDirectFromLdsStoreBitWidth(int bitWidth) const;
-
-  bool supportsMultiCTALaunch() const;
-  bool supportsTDM() const;
-  bool supportsClusterLoadBitWidth(int biwWidth) const;
-
-  bool supportsWaveId() const;
-  bool supportsPermlaneSwap() const;
-  bool supportsCvtPkScalePk8() const;
 
   void localLoadOpAnnotation(triton::gpu::LocalLoadOp localLoadOp,
                              Operation *llLoadOp) const override;

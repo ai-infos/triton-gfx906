@@ -35,11 +35,9 @@ SmallVector<unsigned, 3> mmaVersionToInstrShape(int version,
 // Return true if the Load uses block pointer.
 bool isLoadFromTensorPtr(triton::LoadOp op);
 
-// Gets the order of a tensor from its contiguity. Places the dimensions with
-// the largest contiguity as the inner most dimension. If the contiguity is
-// all ones, returns the order {dim - 1, dim - 2, ..., 0}
-SmallVector<unsigned, 4>
-getOrderFromContiguity(const SmallVector<int64_t> &contiguity);
+// Return an array of indices enumerating the elements of 'arr' in descending
+// order (so that result[i] is the index of the i-th largest element of 'arr')
+SmallVector<unsigned, 4> argSort(const SmallVector<int64_t> &arr);
 
 // Return the operand used to access the memory in the operation
 Value getMemAccessPtr(Operation *op);
@@ -51,8 +49,7 @@ unsigned getElementBitWidth(RankedTensorType type);
 // along an axis with greatest continuity.
 unsigned
 getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
-                        triton::ModuleAxisInfoAnalysis &axisInfoAnalysis,
-                        ArrayRef<int64_t> shape);
+                        triton::ModuleAxisInfoAnalysis &axisInfoAnalysis);
 
 // Returns whether the op is a "view op", i.e. doesn't move any data
 bool isView(Operation *op);
@@ -172,16 +169,8 @@ void appendToForOpYield(scf::ForOp forOp, ArrayRef<Value> newOperands);
 Operation *cloneWithInferType(mlir::OpBuilder &rewriter, Operation *op,
                               IRMapping &mapping);
 
-/// For a given \p root value with desired layout \p rootEncoding, get the
-/// backward slice of values that would have to be recreated to produce the
-/// value of \p root with that layout (without an intervening layout
-/// conversion). The traversal stops once we reach an operand that meets one of
-/// the following:
-///   1. has the desired layout
-///   2. \p getExistingConversion returns an existing converted value
-///   3. \p stopPropagation returns true for an op.
-/// The slice is returned in \p slice, and the desired layout of each value in
-/// the slice is stored in \p layouts.
+// Get backward slice of tensor values starting from the root node along with
+// encoding propagation.
 LogicalResult getConvertBackwardSlice(
     OpOperand &root, SetVector<Value> &slice, Attribute rootEncoding,
     DenseMap<Value, Attribute> &layout,
@@ -222,9 +211,8 @@ std::optional<StringRef> getAMDArch(Operation *module);
 std::optional<mlir::triton::gpu::SwizzledSharedEncodingAttr>
 getSharedEncIfAllUsersAreDotEnc(Value val, bool &incompatible);
 
-// Convert \param op to use \param encoding attribute.
-// Skips operands if they're in shared encoding.
-Operation *convertDistributedOpEncoding(Attribute encoding, Operation *op);
+// Convert \param op operands and results to layout \param encoding.
+void convertOpEncoding(Attribute encoding, Operation *op);
 
 // Returns the original memory allocation for a memdesc value
 triton::gpu::LocalAllocOp findShmemAlloc(Value operand);
@@ -289,13 +277,6 @@ bool comesFromLoadOrBlockArg(Value v);
 // For structured control flow ops, returns the values associated with the
 // `resultIdx`th result.
 SmallVector<Value> getTiedArgs(Operation *op, int resultIdx);
-
-// Verifies the provided memory descriptor type used for barrier allocation
-LogicalResult verifyBarrierType(Operation *op,
-                                mlir::triton::gpu::MemDescType barrierType);
-
-// Get a boolean if the Value is an arith::ConstantOp
-std::optional<bool> getBoolFromConstant(Value cst);
 
 } // namespace mlir::triton
 

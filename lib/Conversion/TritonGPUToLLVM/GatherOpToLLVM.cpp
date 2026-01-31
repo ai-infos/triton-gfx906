@@ -102,7 +102,7 @@ void GatherOpConversion::emitGatherInShared(
   }
 
   // Synchronize the whole CTA.
-  b.barrier(triton::gpu::AddrSpace::Local);
+  b.barrier();
 
   // Grab the index values owned by this thread.
   SmallVector<Value> idxValues =

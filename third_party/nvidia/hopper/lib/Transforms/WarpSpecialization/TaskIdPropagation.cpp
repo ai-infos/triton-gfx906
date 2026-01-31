@@ -193,9 +193,6 @@ void TaskIdBackwardPropagation::visitCallOperand(OpOperand &operand) {
       "Should not have any call operands in the IR after inlining.");
 }
 
-void TaskIdBackwardPropagation::visitNonControlFlowArguments(
-    RegionSuccessor &successor, ArrayRef<BlockArgument> arguments) {}
-
 void TaskIdBackwardPropagation::setToExitState(TaskIdLattice *lattice) {}
 
 } // namespace mlir::triton::gpu

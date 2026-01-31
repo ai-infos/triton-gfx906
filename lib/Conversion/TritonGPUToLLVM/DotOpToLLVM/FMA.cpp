@@ -33,12 +33,11 @@ public:
       // got 'i32'
       llvm::TypeSwitch<Type>(tgtTy)
           .Case<FloatType>([&](auto) {
-            accum = LLVM::FMulAddOp::create(builder, loc, aElem, bElem, accum);
+            accum = builder.create<LLVM::FMulAddOp>(loc, aElem, bElem, accum);
           })
           .Case<IntegerType>([&](auto) {
-            accum = LLVM::AddOp::create(
-                builder, loc, LLVM::MulOp::create(builder, loc, aElem, bElem),
-                accum);
+            accum = builder.create<LLVM::AddOp>(
+                loc, builder.create<LLVM::MulOp>(loc, aElem, bElem), accum);
           });
     }
     return accum;

@@ -70,8 +70,8 @@ class LowerWarpGroup : public OpRewritePattern<WarpGroupOp> {
           output_block->addArgument(value.getType(), value.getLoc());
       valueMap[value] = new_value;
     }
-    auto retOp = triton::gpu::WarpReturnOp::create(
-        rewriter, inputRegion->getLoc(), ArrayRef<Type>(), ArrayRef<Value>());
+    auto retOp = rewriter.create<triton::gpu::WarpReturnOp>(
+        inputRegion->getLoc(), ArrayRef<Type>(), ArrayRef<Value>());
 
     for (auto &op : llvm::make_early_inc_range(
              inputRegion->getBlocks().front().without_terminator())) {
@@ -130,10 +130,10 @@ class LowerWarpGroup : public OpRewritePattern<WarpGroupOp> {
         auto memdescTy = MemDescType::get(
             tensorTy.getShape(), tensorTy.getElementType(), sharedEnc,
             SharedMemorySpaceAttr::get(tensorTy.getContext()));
-        auto alloc = LocalAllocOp::create(rewriter, loc, memdescTy, capture);
+        auto alloc = rewriter.create<LocalAllocOp>(loc, memdescTy, capture);
         for (auto [i, region] : llvm::enumerate(partitions)) {
-          Value value = LocalLoadOp::create(builders[i], capture.getLoc(),
-                                            tensorTy, alloc);
+          Value value = builders[i].create<LocalLoadOp>(capture.getLoc(),
+                                                        tensorTy, alloc);
           replaceAllUsesInRegionWith(capture, value, *region);
           mappings[i].map(capture, value);
         }
@@ -155,29 +155,31 @@ class LowerWarpGroup : public OpRewritePattern<WarpGroupOp> {
       }
     }
 
-    auto wsOp = WarpSpecializeOp::create(
-        rewriter, loc, warpGroupOp.getResultTypes(), numWarps);
+    auto wsOp = rewriter.create<WarpSpecializeOp>(
+        loc, warpGroupOp.getResultTypes(), inputs);
+
+    wsOp.setPartitionNumWarps(numWarps);
 
     auto &defaultBlock = wsOp.getDefaultRegion().emplaceBlock();
     rewriter.setInsertionPointToEnd(&defaultBlock);
 
     if (defaultPartition) {
       auto yieldOp = defaultPartition->front().getTerminator();
-      auto newYieldOp = WarpYieldOp::create(
-          rewriter, loc, yieldOp->getResultTypes(), yieldOp->getOperands());
+      auto newYieldOp = rewriter.create<WarpYieldOp>(
+          loc, yieldOp->getResultTypes(), yieldOp->getOperands());
 
       for (auto &op : llvm::make_early_inc_range(
                defaultPartition->getBlocks().front().without_terminator())) {
         op.moveBefore(newYieldOp);
       }
     } else {
-      WarpYieldOp::create(rewriter, loc, TypeRange(), ArrayRef<Value>());
+      rewriter.create<WarpYieldOp>(loc, TypeRange(), ArrayRef<Value>());
     }
 
     auto &block = wsOp.getPartitionOpHolder().emplaceBlock();
     rewriter.setInsertionPointToStart(&block);
-    auto wspOp = WarpSpecializePartitionsOp::create(rewriter, loc, inputs,
-                                                    partitions.size());
+    auto wspOp =
+        rewriter.create<WarpSpecializePartitionsOp>(loc, partitions.size());
     auto regions = wspOp.getPartitionRegions();
 
     for (auto [in, out, mapping] : zip(partitions, regions, mappings))

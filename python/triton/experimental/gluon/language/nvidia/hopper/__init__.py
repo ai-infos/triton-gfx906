@@ -1,23 +1,14 @@
 from __future__ import annotations
 from triton.compiler.code_generator import unflatten_ir_values
-from ..ampere import async_copy, mma_v2
-from . import cluster, mbarrier, tma
+from ..ampere import async_copy
+from . import mbarrier, tma
 from ... import _core
 
 from typing import List, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     from triton._C.libtriton import ir
 
-__all__ = [
-    "async_copy",
-    "cluster",
-    "fence_async_shared",
-    "mbarrier",
-    "mma_v2",
-    "tma",
-    "warpgroup_mma",
-    "warpgroup_mma_wait",
-]
+__all__ = ["async_copy", "fence_async_shared", "mbarrier", "tma", "warpgroup_mma", "warpgroup_mma_wait"]
 
 
 @_core.builtin
@@ -67,7 +58,7 @@ class warpgroup_mma_accumulator(_core.base_value):
 
 
 @_core.builtin
-def warpgroup_mma_init(value, _semantic=None):
+def warpgroup_mma_init(value, _semantic):
     assert isinstance(value, _core.tensor)
     return warpgroup_mma_accumulator(value.handle, value.type)
 

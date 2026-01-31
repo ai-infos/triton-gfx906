@@ -6,6 +6,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Analysis/AxisInfo.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Utility.h"
@@ -13,6 +14,7 @@
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
+#include "llvm/ADT/SetOperations.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "ttg-utility"
@@ -90,11 +92,9 @@ bool isLoadFromTensorPtr(triton::LoadOp op) {
   return mlir::triton::isTensorPointerType(op.getPtr().getType());
 }
 
-SmallVector<unsigned, 4>
-getOrderFromContiguity(const SmallVector<int64_t> &arr) {
+SmallVector<unsigned, 4> argSort(const SmallVector<int64_t> &arr) {
   SmallVector<unsigned, 4> ret(arr.size());
   std::iota(ret.begin(), ret.end(), 0);
-  std::reverse(ret.begin(), ret.end());
   std::stable_sort(ret.begin(), ret.end(),
                    [&](unsigned x, unsigned y) { return arr[x] > arr[y]; });
   return ret;
@@ -123,10 +123,10 @@ unsigned getElementBitWidth(RankedTensorType type) {
 }
 
 unsigned getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
-                                 ModuleAxisInfoAnalysis &axisInfoAnalysis,
-                                 ArrayRef<int64_t> shapePerCTA) {
+                                 ModuleAxisInfoAnalysis &axisInfoAnalysis) {
   Value val = getMemAccessPtr(op);
   auto ty = cast<RankedTensorType>(val.getType());
+  auto shapePerCTA = triton::gpu::getShapePerCTA(ty);
   AxisInfo &valInfo = *axisInfoAnalysis.getAxisInfo(val);
   unsigned elemNumBits = getElementBitWidth(ty);
   unsigned elemNumBytes = std::max(elemNumBits / 8, 1u);
@@ -431,7 +431,7 @@ static Attribute inferDstEncoding(triton::gpu::Fp4ToFpOp op, Attribute srcEnc) {
 
 static Attribute inferSrcEncoding(triton::gpu::Fp4ToFpOp op, Attribute dstEnc) {
   Attribute srcEnc;
-  auto shape = op.getType().getShape();
+  auto shape = op.getSrc().getType().getShape();
   if (succeeded(
           dstEnc.getDialect()
               .getRegisteredInterface<triton::DialectInferLayoutInterface>()
@@ -523,10 +523,6 @@ Attribute inferSrcEncoding(Operation *op, Attribute encoding) {
     if (!isa<triton::gpu::BlockedEncodingAttr>(encoding))
       return {};
   }
-
-  if (isa<triton::gpu::UpcastFpOpInterface>(op))
-    return {};
-
   if (op->hasTrait<mlir::OpTrait::SameOperandsAndResultEncoding>() ||
       op->hasTrait<mlir::OpTrait::SameLoadStoreOperandsAndResultEncoding>() ||
       op->hasTrait<mlir::OpTrait::Elementwise>() ||
@@ -560,9 +556,6 @@ Attribute inferDstEncoding(Operation *op, Attribute encoding) {
     if (!isa<triton::gpu::BlockedEncodingAttr>(encoding))
       return {};
   }
-  if (isa<triton::gpu::UpcastFpOpInterface>(op))
-    return {};
-
   if (op->hasTrait<mlir::OpTrait::SameOperandsAndResultEncoding>() ||
       op->hasTrait<mlir::OpTrait::SameLoadStoreOperandsAndResultEncoding>() ||
       op->hasTrait<mlir::OpTrait::Elementwise>() ||
@@ -661,9 +654,9 @@ scf::ForOp replaceForOpWithNewSignature(
   // Create a new loop before the existing one, with the extra operands.
   auto operands = llvm::to_vector<4>(loop.getInitArgs());
   operands.append(newIterOperands.begin(), newIterOperands.end());
-  scf::ForOp newLoop =
-      scf::ForOp::create(rewriter, loop.getLoc(), loop.getLowerBound(),
-                         loop.getUpperBound(), loop.getStep(), operands);
+  scf::ForOp newLoop = rewriter.create<scf::ForOp>(
+      loop.getLoc(), loop.getLowerBound(), loop.getUpperBound(), loop.getStep(),
+      operands);
   newLoop->setAttrs(loop->getAttrs());
   newLoop.getBody()->erase();
   newLoop.getRegion().getBlocks().splice(
@@ -720,7 +713,7 @@ scf::WhileOp replaceWhileOpWithNewSignature(
   for (Value operand : operands)
     argsTypesBefore.push_back(operand.getType());
   scf::WhileOp newLoop =
-      scf::WhileOp::create(rewriter, loop.getLoc(), resultTypes, operands);
+      rewriter.create<scf::WhileOp>(loop.getLoc(), resultTypes, operands);
   newLoop->setAttrs(loop->getAttrs());
 
   SmallVector<Location> bbArgLocsBefore(argsTypesBefore.size(), loop.getLoc());
@@ -775,8 +768,8 @@ scf::IfOp replaceIfOpWithNewSignature(
   // Create a new loop before the existing one, with the extra operands.
   auto resultTypes = llvm::to_vector<4>(ifOp.getResults().getTypes());
   resultTypes.append(newResultTypes.begin(), newResultTypes.end());
-  scf::IfOp newIf = scf::IfOp::create(rewriter, ifOp.getLoc(), resultTypes,
-                                      ifOp.getCondition());
+  scf::IfOp newIf = rewriter.create<scf::IfOp>(ifOp.getLoc(), resultTypes,
+                                               ifOp.getCondition());
   newIf->setAttrs(ifOp->getAttrs());
 
   newIf.getThenRegion().takeBody(ifOp.getThenRegion());
@@ -796,7 +789,7 @@ void appendToForOpYield(scf::ForOp forOp, ArrayRef<Value> newOperands) {
   operands.append(newOperands.begin(), newOperands.end());
 
   OpBuilder builder(yieldOp);
-  scf::YieldOp::create(builder, yieldOp->getLoc(), operands);
+  builder.create<scf::YieldOp>(yieldOp->getLoc(), operands);
   yieldOp->erase();
 }
 
@@ -887,21 +880,19 @@ LogicalResult getConvertBackwardSlice(
     queue.pop_back();
     if (!isa<RankedTensorType>(currentValue.getType()))
       continue;
-    // Skip propagating through for op/while op/ws op results for now.
+    // Skip propagating through for op results for now.
     // TODO: enable this based on needs.
-    auto defOp = currentValue.getDefiningOp();
-    if (isa_and_nonnull<scf::ForOp, scf::WhileOp, ttg::WarpSpecializeOp>(defOp))
+    if (currentValue.getDefiningOp<scf::ForOp>())
       return failure();
     if (failed(updateLayout(currentValue, encoding)))
       return failure();
 
-    // If there is already an existing conversion to the target layout, we don't
-    // need to propagate to the operands.
-    // Note that this is per-use rather than per-value, so if another use fails
-    // the getExistingConversion check, we may still traverse the operands.
+    Value existing;
     if (getExistingConversion &&
-        getExistingConversion(*currentValueUse, encoding)) {
-      continue;
+        (existing = getExistingConversion(*currentValueUse, encoding))) {
+      if (failed(updateLayout(existing, encoding)))
+        return failure();
+      currentValue = existing;
     }
 
     if (auto ifOp = currentValue.getDefiningOp<scf::IfOp>()) {
@@ -945,13 +936,7 @@ LogicalResult getConvertBackwardSlice(
         continue;
       }
       for (auto [i, operand] : llvm::enumerate(definingOp->getOpOperands())) {
-        Attribute srcEncoding;
-        if (auto upcast =
-                dyn_cast<triton::gpu::UpcastFpOpInterface>(definingOp)) {
-          srcEncoding = upcast.inferSrcEncoding(i, encoding);
-        } else {
-          srcEncoding = inferSrcEncoding(definingOp, encoding);
-        }
+        auto srcEncoding = inferSrcEncoding(definingOp, encoding);
         if (!srcEncoding)
           return failure();
         // If the infered layout matches the original one we don't need to keep
@@ -1009,9 +994,9 @@ SmallVector<Value> delinearize(OpBuilder &b, Location loc, Value linear,
   } else {
     Value remained = linear;
     for (auto &&en : llvm::enumerate(shape.drop_back())) {
-      auto dimSize = arith::ConstantIntOp::create(b, loc, en.value(), 32);
-      multiDim[en.index()] = arith::RemSIOp::create(b, loc, remained, dimSize);
-      remained = arith::DivSIOp::create(b, loc, remained, dimSize);
+      auto dimSize = b.create<arith::ConstantIntOp>(loc, en.value(), 32);
+      multiDim[en.index()] = b.create<arith::RemSIOp>(loc, remained, dimSize);
+      remained = b.create<arith::DivSIOp>(loc, remained, dimSize);
     }
     multiDim[rank - 1] = remained;
   }
@@ -1027,14 +1012,14 @@ Value linearize(OpBuilder &b, Location loc, ArrayRef<Value> multiDim,
 Value linearize(OpBuilder &b, Location loc, ArrayRef<Value> multiDim,
                 ArrayRef<unsigned> shape) {
   auto rank = multiDim.size();
-  Value linear = arith::ConstantIntOp::create(b, loc, 0, 32);
+  Value linear = b.create<arith::ConstantIntOp>(loc, 0, 32);
   if (rank > 0) {
     linear = multiDim.back();
     for (auto [dim, dimShape] :
          llvm::reverse(llvm::zip(multiDim.drop_back(), shape.drop_back()))) {
-      Value dimSize = arith::ConstantIntOp::create(b, loc, dimShape, 32);
-      linear = arith::AddIOp::create(
-          b, loc, arith::MulIOp::create(b, loc, linear, dimSize), dim);
+      Value dimSize = b.create<arith::ConstantIntOp>(loc, dimShape, 32);
+      linear = b.create<arith::AddIOp>(
+          loc, b.create<arith::MulIOp>(loc, linear, dimSize), dim);
     }
   }
   return linear;
@@ -1084,7 +1069,7 @@ std::optional<StringRef> getAMDArch(Operation *module) {
 }
 
 inline ttg::SwizzledSharedEncodingAttr
-swizzleDotOperandLike(RankedTensorType type, ttg::CGAEncodingAttr cgaLayout) {
+swizzleDotOperandLike(RankedTensorType type, ttg::CTALayoutAttr ctaLayout) {
   // We want to see if the linear layout has the same order as an mma microtile
   // of shape (8, 4*kWidth) or (4*kWidth, 8). If so, we return a
   // DotOperandEncodingAttr with a tile of this shape This works because
@@ -1118,7 +1103,7 @@ swizzleDotOperandLike(RankedTensorType type, ttg::CGAEncodingAttr cgaLayout) {
     return {};
   }
   return ttg::SwizzledSharedEncodingAttr::get(
-      ctx, opIdx, kWidth, type.getShape(), order, cgaLayout,
+      ctx, opIdx, kWidth, type.getShape(), order, ctaLayout,
       type.getElementTypeBitWidth(), false);
 }
 
@@ -1151,22 +1136,22 @@ getSharedEncIfAllUsersAreDotEnc(Value val, bool &incompatible) {
       auto srcTy = cast<triton::gpu::TensorOrMemDesc>(val.getType());
       auto dstTy = cast<RankedTensorType>(user->getResult(0).getType());
 
-      // FIXME This may not be correct for multiple CTA, but getCGALayout is NYI
+      // FIXME This may not be correct for multiple CTA, but getCTALayout is NYI
       // for LinearEncodingAttr
-      auto CGALayout = isa<ttg::LinearEncodingAttr>(dstTy.getEncoding())
-                           ? ttg::getCGALayout(srcTy.getEncoding())
-                           : ttg::getCGALayout(dstTy.getEncoding());
+      auto CTALayout = isa<ttg::LinearEncodingAttr>(dstTy.getEncoding())
+                           ? ttg::getCTALayout(srcTy.getEncoding())
+                           : ttg::getCTALayout(dstTy.getEncoding());
 
       if (auto dot =
               dyn_cast<ttg::DotOperandEncodingAttr>(dstTy.getEncoding())) {
         auto order = getOrderForMemory(srcTy);
         unsigned bitWidth = srcTy.getElementTypeBitWidth();
         tempAttr = ttg::SwizzledSharedEncodingAttr::get(
-            val.getContext(), dot, srcTy.getShape(), order, CGALayout, bitWidth,
+            val.getContext(), dot, srcTy.getShape(), order, CTALayout, bitWidth,
             /*needTrans=*/false);
       } else {
         // Try to see if the layout is like an mma microtile
-        tempAttr = swizzleDotOperandLike(dstTy, CGALayout);
+        tempAttr = swizzleDotOperandLike(dstTy, CTALayout);
       }
       if (!tempAttr)
         return std::nullopt;
@@ -1179,66 +1164,6 @@ getSharedEncIfAllUsersAreDotEnc(Value val, bool &incompatible) {
     attr = tempAttr;
   }
   return attr;
-}
-
-static Type getNewType(Type type, Attribute encoding) {
-  RankedTensorType tensorType = cast<RankedTensorType>(type);
-  return RankedTensorType::get(tensorType.getShape(),
-                               tensorType.getElementType(), encoding);
-}
-
-static bool skipOperand(Operation *op, unsigned operandNumber) {
-  if (auto gather = dyn_cast<DescriptorGatherOp>(op)) {
-    return operandNumber == gather.getXOffsetsMutable().getOperandNumber();
-  }
-  if (auto scatter = dyn_cast<DescriptorScatterOp>(op)) {
-    return operandNumber == scatter.getXOffsetsMutable().getOperandNumber();
-  }
-  return false;
-}
-
-Operation *convertDistributedOpEncoding(Attribute encoding, Operation *op) {
-  OpBuilder builder(op);
-  // Convert operands
-  // For load/store with tensor pointers, we don't have to change the
-  // operands' type, we do this by changing the outputs' type of
-  // `make_tensor_ptr`
-  SmallVector<Value, 4> newArgs;
-  for (auto &opOperand : op->getOpOperands()) {
-    Value operand = opOperand.get();
-    auto tensorType = dyn_cast<RankedTensorType>(operand.getType());
-    bool skip = skipOperand(op, opOperand.getOperandNumber());
-    if (tensorType && !skip) {
-      Type newType = getNewType(tensorType, encoding);
-      newArgs.push_back(triton::gpu::ConvertLayoutOp::create(
-          builder, op->getLoc(), newType, operand));
-    } else {
-      newArgs.push_back(operand);
-    }
-  }
-
-  // Convert output types
-  SmallVector<Type, 4> newTypes;
-  for (auto t : op->getResultTypes()) {
-    bool isAsync = isa<triton::gpu::AsyncCopyGlobalToLocalOp>(op);
-    newTypes.push_back(isAsync ? t : getNewType(t, encoding));
-  }
-
-  // Construct new op with the new encoding
-  Operation *newOp = builder.create(op->getLoc(), op->getName().getIdentifier(),
-                                    newArgs, newTypes, op->getAttrs());
-
-  // Cast the results back to the original layout
-  for (size_t i = 0; i < op->getNumResults(); i++) {
-    Value newResult = newOp->getResult(i);
-    if (newTypes[i] != op->getResultTypes()[i]) {
-      newResult = triton::gpu::ConvertLayoutOp::create(
-          builder, op->getLoc(), op->getResult(i).getType(), newResult);
-    }
-    op->getResult(i).replaceAllUsesWith(newResult);
-  }
-  op->erase();
-  return newOp;
 }
 
 namespace {
@@ -1357,15 +1282,18 @@ struct ForOpDeadArgElimination : public OpRewritePattern<scf::ForOp> {
 
       deadArg.push_back(yieldOperand.index());
     }
-    bool changed = false;
-    // For simplicity we just replace users of the block arg with init value and
-    // leave the operations and argument removal to dead code elimination.
-    for (unsigned deadArgIdx : deadArg) {
-      BlockArgument arg = block.getArgument(deadArgIdx + 1);
-      changed |= !arg.use_empty();
-      rewriter.replaceAllUsesWith(arg, forOp.getTiedLoopInit(arg)->get());
-    }
-    return success(changed);
+    if (deadArg.empty())
+      return failure();
+    rewriter.modifyOpInPlace(forOp, [&]() {
+      // For simplicity we just change the dead yield operand to use the
+      // associated argument and leave the operations and argument removal to
+      // dead code elimination.
+      for (unsigned deadArgIdx : deadArg) {
+        BlockArgument arg = block.getArgument(deadArgIdx + 1);
+        yieldOp.setOperand(deadArgIdx, arg);
+      }
+    });
+    return success();
   }
 };
 
@@ -1545,9 +1473,9 @@ void replaceUsesAndPropagateType(
   // TODO: can we use an early_inc iterator?
   for (OpOperand &use : oldUse->getUses()) {
     // Propagate through `ttg.warp_specialize`.
-    if (auto wsOp = dyn_cast<ttg::WarpSpecializePartitionsOp>(use.getOwner())) {
-      for (Region &region : wsOp.getPartitionRegions())
-        region.getArgument(use.getOperandNumber()).setType(val.getType());
+    if (auto wsOp = dyn_cast<ttg::WarpSpecializeOp>(use.getOwner())) {
+      for (Region *region : wsOp.getPartitionRegions())
+        region->getArgument(use.getOperandNumber()).setType(val.getType());
     }
 
     // Non-subview/trans ops will be replaced by `val`.
@@ -1565,24 +1493,24 @@ void replaceUsesAndPropagateType(
       bool isMutable = cast<ttg::MemDescType>(val.getType()).getMutableMemory();
       Type newDstType = ttg::MemDescType::get(
           oldType.getShape(), oldType.getElementType(), oldType.getEncoding(),
-          oldType.getMemorySpace(), isMutable);
-      newVal = ttg::MemDescIndexOp::create(builder, subview.getLoc(),
-                                           newDstType, val, subview.getIndex());
+          oldType.getMemorySpace(), isMutable, oldType.getAllocShape());
+      newVal = builder.create<ttg::MemDescIndexOp>(subview.getLoc(), newDstType,
+                                                   val, subview.getIndex());
     } else if (auto subslice = dyn_cast<ttg::MemDescSubsliceOp>(user)) {
       ttg::MemDescType oldType = subslice.getType();
       bool isMutable = cast<ttg::MemDescType>(val.getType()).getMutableMemory();
       Type newDstType = ttg::MemDescType::get(
           oldType.getShape(), oldType.getElementType(), oldType.getEncoding(),
           oldType.getMemorySpace(), isMutable, oldType.getAllocShape());
-      newVal = ttg::MemDescSubsliceOp::create(
-          builder, subslice.getLoc(), newDstType, val, subslice.getOffsets());
+      newVal = builder.create<ttg::MemDescSubsliceOp>(
+          subslice.getLoc(), newDstType, val, subslice.getOffsets());
     } else if (auto trans = dyn_cast<ttg::MemDescTransOp>(user)) {
-      newVal = ttg::MemDescTransOp::create(builder, trans.getLoc(), val,
-                                           trans.getOrder());
+      newVal = builder.create<ttg::MemDescTransOp>(trans.getLoc(), val,
+                                                   trans.getOrder());
     } else if (auto reshape = dyn_cast<ttg::MemDescReshapeOp>(user)) {
       auto shape = reshape.getType().getShape();
       newVal =
-          ttg::MemDescReshapeOp::create(builder, reshape.getLoc(), val, shape);
+          builder.create<ttg::MemDescReshapeOp>(reshape.getLoc(), val, shape);
     }
     assert(newVal && "unhandled memdesc view");
     newVal.getDefiningOp()->setAttrs(user->getAttrs());
@@ -1600,8 +1528,8 @@ void replaceUsesAndPropagateType(
       builder.setInsertionPointAfter(wait);
       auto operands = llvm::to_vector(wait.getOperands());
       operands[operand->getOperandNumber()] = val;
-      auto newWait = ttng::WarpGroupDotWaitOp::create(
-          builder, wait.getLoc(), operands, wait.getPendings());
+      auto newWait = builder.create<ttng::WarpGroupDotWaitOp>(
+          wait.getLoc(), operands, wait.getPendings());
       wait.replaceAllUsesWith(newWait.getResults());
       wait.erase();
     } else {
@@ -1636,8 +1564,8 @@ replaceUsesWithLocalLoad(OpBuilder &builder, OpResult old,
   if (std::distance(old.getUsers().begin(), old.getUsers().end()) >
       allocsToErase.size()) {
     auto loc = old.getOwner()->getLoc();
-    maybeLocalLoad =
-        ttg::LocalLoadOp::create(builder, loc, old.getType(), alloc, token);
+    maybeLocalLoad = builder.template create<ttg::LocalLoadOp>(
+        loc, old.getType(), alloc, token);
     old.replaceAllUsesWith(maybeLocalLoad);
   }
   for (auto alloc : allocsToErase) {
@@ -1704,28 +1632,6 @@ SmallVector<Value> getTiedArgs(Operation *op, int resultIdx) {
     return values;
   }
   return {};
-}
-
-LogicalResult verifyBarrierType(Operation *op,
-                                mlir::triton::gpu::MemDescType barrierType) {
-  auto numCTAs = triton::gpu::lookupNumCTAs(op);
-  if (!(barrierType.getElementType().isInteger(64) &&
-        barrierType.getRank() == 1 && barrierType.getShape()[0] <= numCTAs))
-    return op->emitOpError("barrier allocation must be a descriptor of "
-                           "Nxi64 type with N <= number of CTAs");
-  return success();
-}
-
-std::optional<bool> getBoolFromConstant(Value cst) {
-  auto constantOp = cst.getDefiningOp<arith::ConstantOp>();
-  if (!constantOp) {
-    return std::nullopt;
-  }
-  assert(constantOp.getValue());
-  if (auto boolAttr = dyn_cast<BoolAttr>(constantOp.getValue())) {
-    return boolAttr.getValue();
-  }
-  return std::nullopt;
 }
 
 } // namespace mlir::triton

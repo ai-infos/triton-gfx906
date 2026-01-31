@@ -18,9 +18,7 @@ public:
                Value cmp) const override;
 
   void barrier(Location loc, RewriterBase &rewriter,
-               triton::gpu::AddrSpace targets) const override;
-
-  void warpSync(Location loc, RewriterBase &rewriter) const override;
+               bool isWarpSync = false) const override;
 
   void storeDShared(RewriterBase &rewriter, Location loc, Value ptr,
                     std::optional<Value> ctaId, Value val,
@@ -31,7 +29,6 @@ public:
 
   bool supportLdMatrix() const override { return computeCapability >= 75; }
   bool supportStMatrix() const override { return computeCapability >= 90; }
-  bool supportLdStMatrixB8() const override { return computeCapability >= 100; }
 
   Value shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                    int i) const override;

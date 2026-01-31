@@ -12,10 +12,13 @@
 
 namespace proton {
 
+// TODO(fywkevin): this time gap to offset multiple kernels is not needed after
+// we have the global time.
+const uint64_t kKernelTimeGap = 10000000;
+
 struct KernelMetadata {
   std::map<int, std::string> scopeName;
   std::string kernelName;
-  std::vector<std::string> callStack;
 };
 
 using KernelTrace = std::pair<std::shared_ptr<CircularLayoutParserResult>,
@@ -51,7 +54,7 @@ public:
 
 private:
   void writeKernel(nlohmann::json &object, const KernelTrace &kernelTrace,
-                   const uint64_t minInitTime);
+                   uint64_t kernelTimeStart);
 
   const std::vector<std::string> kChromeColor = {"cq_build_passed",
                                                  "cq_build_failed",

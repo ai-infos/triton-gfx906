@@ -25,7 +25,7 @@
 include "mlir/IR/OpBase.td"
 
 def NVGPU_Dialect : Dialect {
-  let name = "nvg";
+  let name = "nvgpu";
   let cppNamespace = "::mlir::triton::nvgpu";
 
   let description = [{

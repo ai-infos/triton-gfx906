@@ -27,16 +27,14 @@ add_triton_library(TritonGPUTransforms
   ReorderInstructions.cpp
   CoalesceAsyncCopy.cpp
   Utility.cpp
-  CoalesceUtils.cpp
-  LayoutPropagationUtility.cpp
   WarpSpecialization/AutomaticWarpSpecialization.cpp
+  WarpSpecialization/LoadMMASpecialization.cpp
   WarpSpecialization/Partition.cpp
   WarpSpecialization/OptimizePartitionWarps.cpp
   WarpSpecialization/PartitionBuilder.cpp
   WarpSpecialization/PartitionLoops.cpp
   WarpSpecialization/PartitionScheduling.cpp
-  WarpSpecialization/PartitionSchedulingUtility.cpp
-
+  WarpSpecialization/RewritePartitionDependencies.cpp
   DEPENDS
   TritonGPUTransformsIncGen
 

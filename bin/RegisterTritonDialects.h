@@ -36,17 +36,7 @@
 
 #include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
-#include "mlir/Dialect/LLVMIR/Transforms/InlinerInterfaceImpl.h"
 #include "mlir/InitAllPasses.h"
-
-#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
-#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
-#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
-#include "mlir/Conversion/NVVMToLLVM/NVVMToLLVM.h"
-#include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
-
-#include "triton/Tools/PluginUtils.h"
-#include "triton/Tools/Sys/GetEnv.hpp"
 
 namespace mlir {
 namespace test {
@@ -54,7 +44,6 @@ void registerTestAliasPass();
 void registerTestAlignmentPass();
 void registerAMDTestAlignmentPass();
 void registerTestAllocationPass();
-void registerTestBufferRegionPass();
 void registerTestMembarPass();
 void registerTestAMDGPUMembarPass();
 void registerTestTritonAMDGPURangeAnalysis();
@@ -76,7 +65,6 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   mlir::test::registerTestAlignmentPass();
   mlir::test::registerAMDTestAlignmentPass();
   mlir::test::registerTestAllocationPass();
-  mlir::test::registerTestBufferRegionPass();
   mlir::test::registerTestMembarPass();
   mlir::test::registerTestLoopPeelingPass();
   mlir::test::registerTestAMDGPUMembarPass();
@@ -91,44 +79,28 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   mlir::triton::registerConvertNVGPUToLLVMPass();
   mlir::triton::registerAllocateSharedMemoryNvPass();
   mlir::registerLLVMDIScope();
-  mlir::LLVM::registerInlinerInterface(registry);
-  mlir::NVVM::registerInlinerInterface(registry);
-  mlir::registerLLVMDILocalVariable();
 
   // TritonAMDGPUToLLVM passes
   mlir::triton::registerAllocateAMDGPUSharedMemory();
-  mlir::triton::registerTritonAMDGPUConvertWarpSpecializeToLLVM();
   mlir::triton::registerConvertTritonAMDGPUToLLVM();
   mlir::triton::registerConvertBuiltinFuncToLLVM();
-  mlir::triton::registerConvertWarpPipeline();
-
-  mlir::ub::registerConvertUBToLLVMInterface(registry);
-  mlir::registerConvertNVVMToLLVMInterface(registry);
-  mlir::registerConvertMathToLLVMInterface(registry);
-  mlir::cf::registerConvertControlFlowToLLVMInterface(registry);
-  mlir::arith::registerConvertArithToLLVMInterface(registry);
+  mlir::triton::registerOptimizeAMDLDSUsage();
 
   // TritonAMDGPUTransforms passes
   mlir::registerTritonAMDGPUAccelerateMatmul();
   mlir::registerTritonAMDGPUOptimizeEpilogue();
   mlir::registerTritonAMDGPUHoistLayoutConversions();
-  mlir::registerTritonAMDGPUSinkLayoutConversions();
-  mlir::registerTritonAMDGPUPrepareIfCombining();
   mlir::registerTritonAMDGPUReorderInstructions();
   mlir::registerTritonAMDGPUBlockPingpong();
-  mlir::registerTritonAMDGPUPipeline();
-  mlir::registerTritonAMDGPUScheduleLoops();
+  mlir::registerTritonAMDGPUStreamPipeline();
   mlir::registerTritonAMDGPUCanonicalizePointers();
   mlir::registerTritonAMDGPUConvertToBufferOps();
-  mlir::registerTritonAMDGPUConvertToTensorOps();
   mlir::registerTritonAMDGPUInThreadTranspose();
   mlir::registerTritonAMDGPUCoalesceAsyncCopy();
   mlir::registerTritonAMDGPUUpdateAsyncWaitCount();
-  mlir::registerTritonAMDGPUWarpPipeline();
   mlir::triton::registerTritonAMDGPUInsertInstructionSchedHints();
   mlir::triton::registerTritonAMDGPULowerInstructionSchedHints();
   mlir::registerTritonAMDFoldTrueCmpI();
-  mlir::triton::amdgpu::registerTritonAMDGPUOptimizeDotOperands();
 
   // NVWS passes
   mlir::triton::registerNVWSTransformsPasses();
@@ -145,34 +117,6 @@ inline void registerTritonDialects(mlir::DialectRegistry &registry) {
   mlir::triton::proton::gpu::registerAllocateProtonGlobalScratchBufferPass();
   mlir::triton::proton::gpu::registerScheduleBufferStorePass();
   mlir::triton::proton::gpu::registerAddSchedBarriersPass();
-
-  // Plugin passes
-  if (std::string filename =
-          mlir::triton::tools::getStrEnv("TRITON_PASS_PLUGIN_PATH");
-      !filename.empty()) {
-
-    TritonPlugin TP(filename);
-    std::vector<const char *> passNames;
-    if (auto result = TP.getPassHandles(passNames); !result)
-      llvm::report_fatal_error(result.takeError());
-
-    for (const char *passName : passNames)
-      if (auto result = TP.registerPass(passName); !result)
-        llvm::report_fatal_error(result.takeError());
-
-    std::vector<const char *> dialectNames;
-    if (auto result = TP.getDialectHandles(dialectNames); !result)
-      llvm::report_fatal_error(result.takeError());
-
-    for (unsigned i = 0; i < dialectNames.size(); ++i) {
-      const char *dialectName = dialectNames.data()[i];
-      auto result = TP.getDialectPluginInfo(dialectName);
-      if (!result)
-        llvm::report_fatal_error(result.takeError());
-      ::mlir::DialectPluginLibraryInfo dialectPluginInfo = *result;
-      dialectPluginInfo.registerDialectRegistryCallbacks(&registry);
-    }
-  }
 
   registry.insert<
       mlir::triton::TritonDialect, mlir::cf::ControlFlowDialect,

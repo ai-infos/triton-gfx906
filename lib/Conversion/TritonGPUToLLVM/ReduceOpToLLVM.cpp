@@ -112,7 +112,7 @@ private:
   void sync(ConversionPatternRewriter &rewriter, Location loc,
             triton::ReduceOp op) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
-    b.barrier(triton::gpu::AddrSpace::Local);
+    b.barrier();
   }
 
   // Reduce along op axis for elements that are in the same thread. The

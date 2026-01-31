@@ -23,23 +23,9 @@ def set_iterable_path(iterable: IterableType, path: tuple[int, ...], val: Any):
     prev._setitem(path[-1], val)
 
 
-def is_iterable(x):
-    from .language import core
-    return isinstance(x, (list, tuple, core.tuple, core.tuple_type))
-
-
-def apply_with_path(value: Any, fn: Callable[[ObjPath, Any], None], _path=None) -> None:
-    if _path is None:
-        _path = ()
-
-    if is_iterable(value):
-        for idx, item in enumerate(value):
-            apply_with_path(item, fn, _path=(*_path, idx))
-    else:
-        fn(_path, value)
-
-
 def find_paths_if(iterable: Union[IterableType, Any], pred: Callable[[ObjPath, Any], bool]) -> list[ObjPath]:
+    from .language import core
+    is_iterable: Callable[[Any], bool] = lambda x: isinstance(x, (list, tuple, core.tuple, core.tuple_type))
     # We need to use dict so that ordering is maintained, while set doesn't guarantee order
     ret: dict[ObjPath, None] = {}
 
@@ -119,10 +105,6 @@ def canonicalize_dtype(dtype):
     return type_canonicalisation_dict[dtype_str]
 
 
-def canonicalize_ptr_dtype(dtype, is_const):
-    return f"{'*k' if is_const else '*'}{canonicalize_dtype(dtype)}"
-
-
 BITWIDTH_DICT: Dict[str, int] = {
     **{f"u{n}": n
        for n in (1, 8, 16, 32, 64)},
@@ -142,16 +124,3 @@ for k, v in type_canonicalisation_dict.items():
 
 def get_primitive_bitwidth(dtype: str) -> int:
     return BITWIDTH_DICT[dtype]
-
-
-def is_namedtuple(val):
-    return isinstance(val, type) and issubclass(val, tuple) and hasattr(val, "_fields")
-
-
-def _tuple_create(arg, contents):
-    # NamedTuples and tuples have different construction semantics. NamedTuple
-    # has a constructor that takes individual arguments, while tuple takes an
-    # iterable. Both have type "tuple" making it difficult to distinguish
-    # between them, but only NamedTuple has "_fields" and apparently this is how
-    # everyone does the check.
-    return type(arg)(*contents) if hasattr(arg, "_fields") else type(arg)(contents)

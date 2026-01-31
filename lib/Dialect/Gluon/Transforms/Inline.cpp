@@ -22,7 +22,7 @@ struct Inline : public gluon::impl::GluonInlineBase<Inline> {
 void Inline::runOnOperation() {
   mlir::PassManager pm(&getContext());
   pm.addPass(createInlinerPass(/*opPipelines=*/{}, [](OpPassManager &pm) {
-    pm.addPass(gluon::createGluonSimplifyControlFlow());
+    pm.addPass(gluon::createGluonCanonicalize());
   }));
   if (failed(pm.run(getOperation())))
     return signalPassFailure();

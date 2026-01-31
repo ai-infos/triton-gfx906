@@ -32,7 +32,7 @@ static OwningOpRef<ModuleOp> takeIntoFunction(ModuleAxisInfoAnalysis &axisInfo,
 
   auto b = OpBuilder::atBlockBegin(containerBlock);
   FunctionType funcType = b.getFunctionType(partition->getArgumentTypes(), {});
-  auto containerFunc = FuncOp::create(b, mod.getLoc(), "container", funcType);
+  auto containerFunc = b.create<FuncOp>(mod.getLoc(), "container", funcType);
   containerFunc.getBody().takeBody(*partition);
   container.get()->setAttrs(mod->getAttrs());
   container.get()->setAttr(AttrNumWarpsName, b.getI32IntegerAttr(numWarps));
@@ -40,7 +40,7 @@ static OwningOpRef<ModuleOp> takeIntoFunction(ModuleAxisInfoAnalysis &axisInfo,
   // Replace `ttg.warp_return` with `tt.return` to make the IR valid.
   containerFunc.walk([&](WarpReturnOp op) {
     b.setInsertionPoint(op);
-    ReturnOp::create(b, op.getLoc());
+    b.create<ReturnOp>(op.getLoc());
     op.erase();
   });
 
@@ -53,8 +53,7 @@ static OwningOpRef<ModuleOp> takeIntoFunction(ModuleAxisInfoAnalysis &axisInfo,
   auto *funcInfo =
       axisInfo.getFuncData(wsOp->getParentOfType<FunctionOpInterface>());
   assert(funcInfo && "expected to find function axis info");
-  for (auto [i, capture] :
-       llvm::enumerate(wsOp.getPartitionOp().getExplicitCaptures())) {
+  for (auto [i, capture] : llvm::enumerate(wsOp.getExplicitCaptures())) {
     AxisInfo info = funcInfo->lookup(capture);
     containerFunc.setArgAttr(i, "tt.contiguity",
                              b.getI64IntegerAttr(info.getContiguity(0)));
@@ -75,7 +74,7 @@ static void extractPartitionBody(OwningOpRef<ModuleOp> container,
   // Rewrite the returns.
   containerFunc.walk([](ReturnOp op) {
     OpBuilder b(op);
-    WarpReturnOp::create(b, op.getLoc());
+    b.create<WarpReturnOp>(op.getLoc());
     op.erase();
   });
 
@@ -294,25 +293,19 @@ struct OptimizePartitionWarps
 } // namespace
 
 void OptimizePartitionWarps::runOnOperation() {
-  SmallVector<WarpSpecializeOp> wsOps;
-  getOperation().walk([&](WarpSpecializeOp wsOp) { wsOps.push_back(wsOp); });
-
-  if (wsOps.empty()) {
-    return;
-  }
-
   ModuleAxisInfoAnalysis axisInfo(getOperation());
   auto runPipelineFn = [&](OpPassManager &pm, ModuleOp container) {
     // The module must be directly nested under the current op for `runPipeline`
     // to work.
     getOperation().push_back(container);
-    llvm::scope_exit remove([&] { container->remove(); });
+    auto remove = llvm::make_scope_exit([&] { container->remove(); });
     return runPipeline(pm, container);
   };
-
-  for (auto wsOp : wsOps) {
-    if (failed(optimizePartitionNumWarps(axisInfo, wsOp, runPipelineFn))) {
-      return signalPassFailure();
-    }
-  }
+  WalkResult result = getOperation().walk([&](WarpSpecializeOp wsOp) {
+    if (failed(optimizePartitionNumWarps(axisInfo, wsOp, runPipelineFn)))
+      return WalkResult::interrupt();
+    return WalkResult::skip();
+  });
+  if (result.wasInterrupted())
+    return signalPassFailure();
 }

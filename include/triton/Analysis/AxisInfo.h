@@ -108,13 +108,10 @@ public:
 
   std::optional<int64_t> getConstantValue() const { return constantValue; }
 
-  static void initPessimisticStateFromFunc(int argNumber,
-                                           FunctionOpInterface funcOp,
-                                           DimVectorT *contiguity,
-                                           DimVectorT *divisibility,
-                                           DimVectorT *constancy);
-
-  static void initDimVectorFromHint(Attribute attr, DimVectorT *vec);
+  template <class T>
+  static void
+  initPessimisticStateFromFunc(int argNumber, T funcOp, DimVectorT *contiguity,
+                               DimVectorT *divisibility, DimVectorT *constancy);
 
   bool operator==(const AxisInfo &other) const {
     return contiguity == other.contiguity &&
@@ -209,14 +206,16 @@ public:
                                   axisinfo::CallbackType callback = nullptr)
       : CallGraph<AxisInfoMapT>(moduleOp) {
     SmallVector<FunctionOpInterface> funcs;
-    walk<WalkOrder::PreOrder, WalkOrder::PostOrder>(
-        // Pre-order edge walk callback
-        [](CallOpInterface callOp, FunctionOpInterface funcOp) {},
-        // Post-order node walk callback
-        [&](FunctionOpInterface funcOp) {
-          funcs.push_back(funcOp);
-          funcMap.try_emplace(funcOp, AxisInfoMapT{});
-        });
+    for (auto root : getRoots()) {
+      walk<WalkOrder::PreOrder, WalkOrder::PostOrder>(
+          // Pre-order edge walk callback
+          [](CallOpInterface callOp, FunctionOpInterface funcOp) {},
+          // Post-order node walk callback
+          [&](FunctionOpInterface funcOp) {
+            funcs.push_back(funcOp);
+            funcMap.try_emplace(funcOp, AxisInfoMapT{});
+          });
+    }
     SetVector<FunctionOpInterface> sortedFuncs(funcs.begin(), funcs.end());
     SymbolTableCollection symbolTable;
     for (auto funcOp : llvm::reverse(sortedFuncs)) {

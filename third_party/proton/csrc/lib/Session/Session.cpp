@@ -12,13 +12,21 @@ namespace proton {
 
 namespace {
 
-Profiler *makeProfiler(const std::string &name) {
+Profiler *getProfiler(const std::string &name, const std::string &path,
+                      const std::string &mode) {
+  std::vector<std::string> modeAndOptions = proton::split(mode, ":");
   if (proton::toLower(name) == "cupti") {
-    return &CuptiProfiler::instance();
-  } else if (proton::toLower(name) == "roctracer") {
+    auto *profiler = &CuptiProfiler::instance();
+    profiler->setLibPath(path);
+    if (proton::toLower(modeAndOptions[0]) == "pcsampling")
+      profiler->enablePCSampling();
+    return profiler;
+  }
+  if (proton::toLower(name) == "roctracer") {
     return &RoctracerProfiler::instance();
-  } else if (proton::toLower(name) == "instrumentation") {
-    return &InstrumentationProfiler::instance();
+  }
+  if (proton::toLower(name) == "instrumentation") {
+    return InstrumentationProfiler::instance().setMode(modeAndOptions);
   }
   throw std::runtime_error("Unknown profiler: " + name);
 }
@@ -57,52 +65,33 @@ void throwIfSessionNotInitialized(
 
 void Session::activate() {
   profiler->start();
+  profiler->flush();
   profiler->registerData(data.get());
 }
 
-void Session::deactivate(bool flushing) {
-  if (flushing)
-    profiler->flush();
+void Session::deactivate() {
+  profiler->flush();
   profiler->unregisterData(data.get());
+  data->clear();
 }
 
 void Session::finalize(const std::string &outputFormat) {
-  profiler->flush();
   profiler->stop();
   data->dump(outputFormat);
 }
 
 size_t Session::getContextDepth() { return contextSource->getDepth(); }
 
-Profiler *SessionManager::validateAndSetProfilerMode(Profiler *profiler,
-                                                     const std::string &mode) {
-  std::vector<std::string> modeAndOptions = proton::split(mode, ":");
-  for (auto &[id, session] : sessions) {
-    if (session->getProfiler() == profiler &&
-        session->getProfiler()->getMode() != modeAndOptions) {
-      throw std::runtime_error("Cannot add a session with the same profiler "
-                               "but a different mode than existing sessions");
-    }
-  }
-  return profiler->setMode(modeAndOptions);
-}
-
 std::unique_ptr<Session> SessionManager::makeSession(
     size_t id, const std::string &path, const std::string &profilerName,
-    const std::string &contextSourceName, const std::string &dataName,
-    const std::string &mode) {
-  auto *profiler = makeProfiler(profilerName);
-  profiler = validateAndSetProfilerMode(profiler, mode);
+    const std::string &profilerPath, const std::string &contextSourceName,
+    const std::string &dataName, const std::string &mode) {
+  auto profiler = getProfiler(profilerName, profilerPath, mode);
   auto contextSource = makeContextSource(contextSourceName);
   auto data = makeData(dataName, path, contextSource.get());
   auto *session = new Session(id, path, profiler, std::move(contextSource),
                               std::move(data));
   return std::unique_ptr<Session>(session);
-}
-
-Session *SessionManager::getSessionOrThrow(size_t sessionId) {
-  throwIfSessionNotInitialized(sessions, sessionId);
-  return sessions[sessionId].get();
 }
 
 void SessionManager::activateSession(size_t sessionId) {
@@ -117,15 +106,15 @@ void SessionManager::activateAllSessions() {
   }
 }
 
-void SessionManager::deactivateSession(size_t sessionId, bool flushing) {
+void SessionManager::deactivateSession(size_t sessionId) {
   std::lock_guard<std::mutex> lock(mutex);
-  deActivateSessionImpl(sessionId, flushing);
+  deActivateSessionImpl(sessionId);
 }
 
-void SessionManager::deactivateAllSessions(bool flushing) {
+void SessionManager::deactivateAllSessions() {
   std::lock_guard<std::mutex> lock(mutex);
   for (auto iter : sessionActive) {
-    deActivateSessionImpl(iter.first, flushing);
+    deActivateSessionImpl(iter.first);
   }
 }
 
@@ -140,39 +129,26 @@ void SessionManager::activateSessionImpl(size_t sessionId) {
   registerInterface<InstrumentationInterface>(sessionId,
                                               instrumentationInterfaceCounts);
   registerInterface<ContextSource>(sessionId, contextSourceCounts);
-  registerInterface<MetricInterface>(sessionId, metricInterfaceCounts);
 }
 
-void SessionManager::deActivateSessionImpl(size_t sessionId, bool flushing) {
+void SessionManager::deActivateSessionImpl(size_t sessionId) {
   throwIfSessionNotInitialized(sessions, sessionId);
   if (!sessionActive[sessionId]) {
     return;
   }
   sessionActive[sessionId] = false;
-  sessions[sessionId]->deactivate(flushing);
+  sessions[sessionId]->deactivate();
   unregisterInterface<ScopeInterface>(sessionId, scopeInterfaceCounts);
   unregisterInterface<OpInterface>(sessionId, opInterfaceCounts);
   unregisterInterface<InstrumentationInterface>(sessionId,
                                                 instrumentationInterfaceCounts);
   unregisterInterface<ContextSource>(sessionId, contextSourceCounts);
-  unregisterInterface<MetricInterface>(sessionId, metricInterfaceCounts);
 }
 
 void SessionManager::removeSession(size_t sessionId) {
   if (!hasSession(sessionId)) {
     return;
   }
-  // Context source can be safely cleared here but not deactivation.
-  // Context source of each session is still sort of active after deactivation,
-  // For example, if we have
-  // ```Python
-  //   proton.deactivate_session(session0)
-  //   with proton.scope("A"):
-  //     proton.activate_session(session0)
-  // ```
-  // session0 should be aware of scope "A"'s enter and exit, otherwise the
-  // context stack will be imbalanced.
-  sessions[sessionId]->contextSource->clear();
   auto path = sessions[sessionId]->path;
   sessionPaths.erase(path);
   sessionActive.erase(sessionId);
@@ -181,6 +157,7 @@ void SessionManager::removeSession(size_t sessionId) {
 
 size_t SessionManager::addSession(const std::string &path,
                                   const std::string &profilerName,
+                                  const std::string &profilerPath,
                                   const std::string &contextSourceName,
                                   const std::string &dataName,
                                   const std::string &mode) {
@@ -191,10 +168,9 @@ size_t SessionManager::addSession(const std::string &path,
     return sessionId;
   }
   auto sessionId = nextSessionId++;
-  auto newSession = makeSession(sessionId, path, profilerName,
-                                contextSourceName, dataName, mode);
   sessionPaths[path] = sessionId;
-  sessions[sessionId] = std::move(newSession);
+  sessions[sessionId] = makeSession(sessionId, path, profilerName, profilerPath,
+                                    contextSourceName, dataName, mode);
   return sessionId;
 }
 
@@ -204,7 +180,7 @@ void SessionManager::finalizeSession(size_t sessionId,
   if (!hasSession(sessionId)) {
     return;
   }
-  deActivateSessionImpl(sessionId, /*flushing=*/true);
+  deActivateSessionImpl(sessionId);
   sessions[sessionId]->finalize(outputFormat);
   removeSession(sessionId);
 }
@@ -213,7 +189,7 @@ void SessionManager::finalizeAllSessions(const std::string &outputFormat) {
   std::lock_guard<std::mutex> lock(mutex);
   auto sessionIds = std::vector<size_t>{};
   for (auto &[sessionId, session] : sessions) {
-    deActivateSessionImpl(sessionId, /*flushing=*/true);
+    deActivateSessionImpl(sessionId);
     session->finalize(outputFormat);
     sessionIds.push_back(sessionId);
   }
@@ -287,21 +263,13 @@ void SessionManager::exitInstrumentedOp(uint64_t streamId, uint64_t functionId,
 }
 
 void SessionManager::addMetrics(
-    size_t scopeId, const std::map<std::string, MetricValueType> &scalarMetrics,
-    const std::map<std::string, TensorMetric> &tensorMetrics) {
+    size_t scopeId, const std::map<std::string, MetricValueType> &metrics) {
   std::lock_guard<std::mutex> lock(mutex);
-  executeInterface(metricInterfaceCounts, [&](auto *metricInterface) {
-    metricInterface->addMetrics(scopeId, scalarMetrics, tensorMetrics);
-  });
-}
-
-void SessionManager::setMetricKernels(void *tensorMetricKernel,
-                                      void *scalarMetricKernel, void *stream) {
-  std::lock_guard<std::mutex> lock(mutex);
-  executeInterface(metricInterfaceCounts, [&](auto *metricInterface) {
-    metricInterface->setMetricKernels(tensorMetricKernel, scalarMetricKernel,
-                                      stream);
-  });
+  for (auto [sessionId, active] : sessionActive) {
+    if (active) {
+      sessions[sessionId]->data->addMetrics(scopeId, metrics);
+    }
+  }
 }
 
 void SessionManager::setState(std::optional<Context> context) {
@@ -316,46 +284,8 @@ void SessionManager::setState(std::optional<Context> context) {
 
 size_t SessionManager::getContextDepth(size_t sessionId) {
   std::lock_guard<std::mutex> lock(mutex);
-  return getSessionOrThrow(sessionId)->getContextDepth();
-}
-
-std::vector<uint8_t> SessionManager::getDataMsgPack(size_t sessionId,
-                                                    size_t phase) {
-  std::lock_guard<std::mutex> lock(mutex);
-  auto *session = getSessionOrThrow(sessionId);
-  auto *treeData = dynamic_cast<TreeData *>(session->data.get());
-  if (!treeData) {
-    throw std::runtime_error(
-        "Only TreeData is supported for getData() for now");
-  }
-  return treeData->toMsgPack(phase);
-}
-
-std::string SessionManager::getData(size_t sessionId, size_t phase) {
-  std::lock_guard<std::mutex> lock(mutex);
-  auto *session = getSessionOrThrow(sessionId);
-  auto *treeData = dynamic_cast<TreeData *>(session->data.get());
-  if (!treeData) {
-    throw std::runtime_error(
-        "Only TreeData is supported for getData() for now");
-  }
-  return treeData->toJsonString(phase);
-}
-
-void SessionManager::clearData(size_t sessionId, size_t phase,
-                               bool clearUpToPhase) {
-  std::lock_guard<std::mutex> lock(mutex);
-  getSessionOrThrow(sessionId)->data->clear(phase, clearUpToPhase);
-}
-
-size_t SessionManager::advanceDataPhase(size_t sessionId) {
-  std::lock_guard<std::mutex> lock(mutex);
-  return getSessionOrThrow(sessionId)->data->advancePhase();
-}
-
-bool SessionManager::isDataPhaseComplete(size_t sessionId, size_t phase) {
-  std::lock_guard<std::mutex> lock(mutex);
-  return getSessionOrThrow(sessionId)->data->getPhaseInfo().isComplete(phase);
+  throwIfSessionNotInitialized(sessions, sessionId);
+  return sessions[sessionId]->getContextDepth();
 }
 
 } // namespace proton

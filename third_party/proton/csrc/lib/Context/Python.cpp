@@ -1,5 +1,4 @@
 #include "Context/Python.h"
-#include "Utility/String.h"
 #include "pybind11/pybind11.h"
 #include <algorithm>
 #include <string>
@@ -68,7 +67,7 @@ std::vector<Context> PythonContextSource::getContextsImpl() {
     size_t firstLineNo = f_code->co_firstlineno;
     std::string file = unpackPyobject(f_code->co_filename);
     std::string function = unpackPyobject(f_code->co_name);
-    auto pythonFrame = formatFileLineFunction(file, lineno, function);
+    auto pythonFrame = file + ":" + function + "@" + std::to_string(lineno);
     contexts.push_back(Context(pythonFrame));
     auto newFrame = getFrameBack(frame);
     Py_DECREF(frame);

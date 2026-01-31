@@ -52,7 +52,7 @@ unsigned ReduceOpHelper::getThreadOffsetOnReductionAxis() {
 
 // Cases where distributed shared memory is not required in ConvertLayout:
 // (1) numCTAs == 1
-// (2) numCTAs > 1 but srcCGALayout == dstCGALayout
+// (2) numCTAs > 1 but srcCTALayout == dstCTALayout
 // TODO: Case with SliceLayout as srcLayout and numCTAs > 1 is to be implemented
 // in the future
 bool shouldUseDistSmem(Attribute srcLayout, Attribute dstLayout) {
@@ -82,16 +82,16 @@ bool shouldUseDistSmem(Attribute srcLayout, Attribute dstLayout) {
       return true;
   }
 
-  // The above two branches make sure that it is legal to call getCGALayout of
+  // The above two branches make sure that it is legal to call getCTALayout of
   // srcLayout and dstLayout
 
-  // Case (2): Do not use dsmem when srcCGALayout == dstCGALayout
-  auto srcCGALayout = getCGALayout(srcLayout);
-  auto dstCGALayout = getCGALayout(dstLayout);
-  if (srcCGALayout == dstCGALayout)
+  // Case (2): Do not use dsmem when srcCTALayout == dstCTALayout
+  auto srcCTALayout = getCTALayout(srcLayout);
+  auto dstCTALayout = getCTALayout(dstLayout);
+  if (srcCTALayout == dstCTALayout)
     return false;
 
-  // Dsmem access is required when srcCGALayout != dstCGALayout
+  // Dsmem access is required when srcCTALayout != dstCTALayout
   return true;
 }
 
@@ -155,40 +155,6 @@ bool ReduceOpHelper::isAssociative() {
     return WalkResult::advance();
   });
   return !hasNoAssociativeOp;
-}
-
-ScanLoweringHelper::ScanLoweringHelper(triton::ScanOp op) : scanOp(op) {
-  auto firstTy = cast<RankedTensorType>(op.getOperands()[0].getType());
-  srcShape = firstTy.getShape();
-  legacyEncoding = firstTy.getEncoding();
-  // Remove broadcasting in the registers
-  // We also remove it in the lowering and re-add it when we pack the results
-  auto origLayout = triton::gpu::toLinearLayout(firstTy);
-  auto removeBroadcastRegs = actionRemoveBroadcastedRegs(origLayout);
-  origLayout = removeBroadcastRegs.apply(origLayout);
-  srcEncoding = triton::gpu::LinearEncodingAttr::get(op.getContext(),
-                                                     std::move(origLayout));
-  srcElementTypes = op.getElementTypes();
-  // The codegen does not support different element/thread/warp order so
-  // we choose one a priori. We choose that of the blocked encoding.
-  // When we generalise this code to other layouts we'll probably need to
-  // get rid of all this logic and the *Stride auxiliary methods
-  // and replace them by transposes and reshapes on the LinearLayout
-  if (auto blockedEncoding =
-          dyn_cast<triton::gpu::BlockedEncodingAttr>(legacyEncoding)) {
-    order = llvm::to_vector(blockedEncoding.getOrder());
-  } else {
-    order = srcEncoding.getOrder();
-  }
-
-  for (const auto &t : op.getInputTypes()) {
-    if (t.getShape() != srcShape) {
-      op.emitError() << "shape mismatch";
-    }
-    if (t.getEncoding() != legacyEncoding) {
-      op.emitError() << "encoding mismatch";
-    }
-  }
 }
 
 unsigned ScanLoweringHelper::getAxisNumElementsPerThread() {
@@ -779,15 +745,18 @@ unsigned ScanLoweringHelper::getAxisElementStride() {
 
 unsigned ScanLoweringHelper::getAxisThreadStride() {
   auto encoding = getEncoding();
-  auto ll = encoding.getLinearLayout();
   auto kThread = StringAttr::get(encoding.getContext(), "lane");
-  const auto &bases = ll.getBases().lookup(kThread);
-  unsigned axis = getAxis();
-  for (unsigned i = 0; i < bases.size(); ++i) {
-    if (bases[i][axis] != 0)
-      return 1 << i;
+  // OOOGHHH This is nasty. We should implement this lowering via LLs natively
+  // to avoid this
+  auto threadsPerWarp = encoding.basesPerDim(kThread, /*skipBroadcast=*/false);
+  auto order = getOrder();
+  unsigned stride = 1;
+  for (unsigned dim : order) {
+    if (dim == getAxis())
+      return stride;
+    stride *= threadsPerWarp[dim];
   }
-  return 1;
+  llvm_unreachable("Axis not found in order");
 }
 
 unsigned ScanLoweringHelper::getAxisBlockStride() {
@@ -1145,10 +1114,114 @@ void dfsPostorder(Operation *root, DFSState *state) {
 
 } // namespace
 
+SetVector<Operation *>
+multiRootTopologicalSort(const SetVector<Operation *> &toSort) {
+  if (toSort.empty()) {
+    return toSort;
+  }
+
+  // Run from each root with global count and `seen` set.
+  DFSState state(toSort);
+  for (auto *s : toSort) {
+    assert(toSort.count(s) == 1 && "NYI: multi-sets not supported");
+    dfsPostorder(s, &state);
+  }
+
+  // Reorder and return.
+  SetVector<Operation *> res;
+  for (auto it = state.topologicalCounts.rbegin(),
+            eit = state.topologicalCounts.rend();
+       it != eit; ++it) {
+    res.insert(*it);
+  }
+  return res;
+}
+
+SetVector<Operation *> multiRootGetSlice(Operation *op,
+                                         TransitiveFilter backwardFilter,
+                                         TransitiveFilter forwardFilter) {
+  SetVector<Operation *> slice;
+  slice.insert(op);
+
+  unsigned currentIndex = 0;
+  SetVector<Operation *> backwardSlice;
+  SetVector<Operation *> forwardSlice;
+  while (currentIndex != slice.size()) {
+    auto *currentOp = (slice)[currentIndex];
+    // Compute and insert the backwardSlice starting from currentOp.
+    backwardSlice.clear();
+    BackwardSliceOptions opt;
+    opt.omitBlockArguments = true;
+    opt.filter = backwardFilter;
+    (void)getBackwardSlice(currentOp, &backwardSlice, opt);
+    slice.insert(backwardSlice.begin(), backwardSlice.end());
+
+    // Compute and insert the forwardSlice starting from currentOp.
+    forwardSlice.clear();
+    getForwardSlice(currentOp, &forwardSlice, forwardFilter);
+    slice.insert(forwardSlice.begin(), forwardSlice.end());
+    ++currentIndex;
+  }
+  return multiRootTopologicalSort(slice);
+}
+
+namespace {
+// Copied from TestDeadCodeAnalysis.cpp, because some dead code analysis
+// interacts with constant propagation, but SparseConstantPropagation
+// doesn't seem to be sufficient.
+class ConstantAnalysis : public DataFlowAnalysis {
+public:
+  using DataFlowAnalysis::DataFlowAnalysis;
+
+  LogicalResult initialize(Operation *top) override {
+    WalkResult result = top->walk([&](Operation *op) {
+      ProgramPoint programPoint(op);
+      if (failed(visit(&programPoint)))
+        return WalkResult::interrupt();
+      return WalkResult::advance();
+    });
+    return success(!result.wasInterrupted());
+  }
+
+  LogicalResult visit(ProgramPoint *point) override {
+    Operation *op = point->getOperation();
+    Attribute value;
+    if (matchPattern(op, m_Constant(&value))) {
+      auto *constant = getOrCreate<dataflow::Lattice<dataflow::ConstantValue>>(
+          op->getResult(0));
+      propagateIfChanged(constant, constant->join(dataflow::ConstantValue(
+                                       value, op->getDialect())));
+      return success();
+    }
+    // Dead code analysis requires every operands has initialized ConstantValue
+    // state before it is visited.
+    // https://github.com/llvm/llvm-project/blob/2ec1aba2b69faa1de5f71832a48e25aa3b5d5314/mlir/lib/Analysis/DataFlow/DeadCodeAnalysis.cpp#L322
+    // That's why we need to set all operands to unknown constants.
+    setAllToUnknownConstants(op->getResults());
+    for (Region &region : op->getRegions()) {
+      for (Block &block : region.getBlocks())
+        setAllToUnknownConstants(block.getArguments());
+    }
+    return success();
+  }
+
+private:
+  /// Set all given values as not constants.
+  void setAllToUnknownConstants(ValueRange values) {
+    dataflow::ConstantValue unknownConstant(nullptr, nullptr);
+    for (Value value : values) {
+      auto *constant =
+          getOrCreate<dataflow::Lattice<dataflow::ConstantValue>>(value);
+      propagateIfChanged(constant, constant->join(unknownConstant));
+    }
+  }
+};
+} // namespace
+
 std::unique_ptr<DataFlowSolver> createDataFlowSolver() {
   auto solver = std::make_unique<DataFlowSolver>();
   solver->load<dataflow::DeadCodeAnalysis>();
-  solver->load<dataflow::SparseConstantPropagation>();
+  solver->load<ConstantAnalysis>();
   return solver;
 }
 

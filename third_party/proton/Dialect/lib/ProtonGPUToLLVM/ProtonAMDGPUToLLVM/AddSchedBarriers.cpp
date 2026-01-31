@@ -1,5 +1,4 @@
 #include "Conversion/ProtonGPUToLLVM/Passes.h"
-#include "Conversion/ProtonGPUToLLVM/Utility.h"
 #include "Dialect/ProtonGPU/IR/Dialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
@@ -29,25 +28,37 @@ struct AddSchedBarriers
     MLIRContext *ctx = &getContext();
     OpBuilder builder(ctx);
 
-    auto funcOps = triton::proton::gpu::getTritonFunctions(mod);
-    assert(funcOps.size() == 1 && "Expected exactly one funcOp");
+    int numFuncOps = 0;
+    FunctionOpInterface func;
+    mod.walk([&](FunctionOpInterface op) {
+      // Ignore any intrinsic functions. On AMD the predicate load/store ops
+      // are currently pseduo instrunctions at this point and may get picked up
+      // here and trigger the FunctionOpInterface range based assert below
+      StringRef funcName(op.getNameAttr());
+      if (!funcName.contains("__")) {
+        numFuncOps += 1;
+        func = op;
+      }
+    });
+
+    assert(numFuncOps == 1);
 
     IntegerAttr zeroAttrValue =
         builder.getI32IntegerAttr(static_cast<int32_t>(0));
 
-    funcOps[0].walk([&](mlir::triton::proton::gpu::ReadCounterOp op) {
+    func.walk([&](mlir::triton::proton::gpu::ReadCounterOp op) {
       auto loc = op.getLoc();
       if (!isa_and_nonnull<ROCDL::SchedBarrier>(op->getPrevNode())) {
         builder.setInsertionPoint(op);
-        ROCDL::SchedBarrier::create(builder, loc, zeroAttrValue);
+        builder.create<ROCDL::SchedBarrier>(loc, zeroAttrValue);
       }
     });
 
-    funcOps[0].walk([&](mlir::triton::proton::gpu::CircularStoreOp op) {
+    func.walk([&](mlir::triton::proton::gpu::CircularStoreOp op) {
       auto loc = op.getLoc();
       if (!isa_and_nonnull<ROCDL::SchedBarrier>(op->getNextNode())) {
         builder.setInsertionPointAfter(op);
-        ROCDL::SchedBarrier::create(builder, loc, zeroAttrValue);
+        builder.create<ROCDL::SchedBarrier>(loc, zeroAttrValue);
       }
     });
   }

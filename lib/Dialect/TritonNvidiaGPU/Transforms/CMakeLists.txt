@@ -1,5 +1,4 @@
 add_triton_library(TritonNvidiaGPUTransforms
-  CheckMatmulTwoCTAs.cpp
   FenceInsertion.cpp
   InterleaveTMem.cpp
   MMALowering.cpp
@@ -7,11 +6,12 @@ add_triton_library(TritonNvidiaGPUTransforms
   OptimizeTMemLayouts.cpp
   PlanCTA.cpp
   PromoteLHSToTMem.cpp
-  ProxyFenceInsertion.cpp
+  ProxFenceInsertion.cpp
   RemoveTMEMTokens.cpp
   TensorMemoryAllocation.cpp
   TMALowering.cpp
   TMAUtilities.cpp
+  Utility.cpp
 
   DEPENDS
   TritonNvidiaGPUTransformsIncGen

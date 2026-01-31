@@ -78,7 +78,33 @@ private:
 
 class ScanLoweringHelper {
 public:
-  explicit ScanLoweringHelper(triton::ScanOp op);
+  explicit ScanLoweringHelper(triton::ScanOp op) : scanOp(op) {
+    auto firstTy = cast<RankedTensorType>(op.getOperands()[0].getType());
+    srcShape = firstTy.getShape();
+    legacyEncoding = firstTy.getEncoding();
+    srcEncoding = triton::gpu::toLinearEncoding(firstTy);
+    srcElementTypes = op.getElementTypes();
+    // The codegen does not support different element/thread/warp order so
+    // we choose one a priori. We choose that of the blocked encoding.
+    // When we generalise this code to other layouts we'll probably need to
+    // get rid of all this logic and the *Stride auxiliary methods
+    // and replace them by transposes and reshapes on the LinearLayout
+    if (auto blockedEncoding =
+            dyn_cast<triton::gpu::BlockedEncodingAttr>(legacyEncoding)) {
+      order = llvm::to_vector(blockedEncoding.getOrder());
+    } else {
+      order = srcEncoding.getOrder();
+    }
+
+    for (const auto &t : op.getInputTypes()) {
+      if (t.getShape() != srcShape) {
+        op.emitError() << "shape mismatch";
+      }
+      if (t.getEncoding() != legacyEncoding) {
+        op.emitError() << "encoding mismatch";
+      }
+    }
+  }
   // Return true if the lowering of the scan op is supported.
   bool isSupported();
   // Return the number of elements per thread along axis dim.
@@ -242,10 +268,21 @@ bool cvtNeedsSharedMemory(RankedTensorType srcTy, RankedTensorType dstTy);
 // ConvertLayoutOpHelper in the future
 bool shouldUseDistSmem(Attribute srcLayout, Attribute dstLayout);
 
+/// Multi-root DAG topological sort.
+/// Performs a topological sort of the Operation in the `toSort` SetVector.
+/// Returns a topologically sorted SetVector.
+/// It is faster than mlir::topologicalSort because it prunes nodes that have
+/// been visited before.
+SetVector<Operation *>
+multiRootTopologicalSort(const SetVector<Operation *> &toSort);
+
+/// This uses the toplogicalSort above
+SetVector<Operation *>
+multiRootGetSlice(Operation *op, TransitiveFilter backwardFilter = nullptr,
+                  TransitiveFilter forwardFilter = nullptr);
+
 /// Create a basic DataFlowSolver with constant and dead code analysis included.
 std::unique_ptr<DataFlowSolver> createDataFlowSolver();
-
-namespace triton {
 
 /// This class represents a call graph for a given ModuleOp and holds
 /// data of type T associated with each FunctionOpInterface.
@@ -385,9 +422,6 @@ protected:
   FuncDataMapT funcMap;
   SmallVector<FunctionOpInterface> roots;
 };
-
-} // namespace triton
-
 // Create a basic DataFlowSolver with constant and dead code analysis included.
 std::unique_ptr<DataFlowSolver> createDataFlowSolver();
 

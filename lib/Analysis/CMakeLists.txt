@@ -1,7 +1,6 @@
 add_triton_library(TritonAnalysis
   AxisInfo.cpp
   Allocation.cpp
-  BufferRegion.cpp
   Membar.cpp
   Alias.cpp
   Utility.cpp
@@ -11,13 +10,11 @@ add_triton_library(TritonAnalysis
   TritonGPUTableGen
   TritonGPUAttrDefsIncGen
   TritonGPUTypeInterfacesIncGen
-  TritonGPUOpInterfacesIncGen
 
   LINK_LIBS PUBLIC
   MLIRAnalysis
   MLIRLLVMDialect
   TritonIR
   TritonGPUIR
-  GluonIR
   TritonNvidiaGPUIR
 )

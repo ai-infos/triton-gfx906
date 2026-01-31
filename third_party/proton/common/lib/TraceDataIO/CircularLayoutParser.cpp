@@ -43,9 +43,6 @@ void CircularLayoutParser::parseMetadata() {
   bt.blockId = decoder.decode<I32Entry>()->value;
   bt.procId = decoder.decode<I32Entry>()->value;
   bt.bufSize = decoder.decode<I32Entry>()->value;
-  bt.initTime = decoder.decode<I64Entry>()->value;
-  bt.preFinalTime = decoder.decode<I64Entry>()->value;
-  bt.postFinalTime = decoder.decode<I64Entry>()->value;
 
   std::vector<uint32_t> countVec;
   for (int i = 0; i < getConfig().totalUnits; i++) {
@@ -56,16 +53,13 @@ void CircularLayoutParser::parseMetadata() {
   int maxCountPerUnit = bt.bufSize / getConfig().uidVec.size() / 8;
 
   for (auto uid : getConfig().uidVec) {
-    // Each event is 2 words (8 bytes) and countVec captures the number of words
-    // of each warp captured during profiling
     auto count = countVec[uid];
-    auto numEvent = count / 2;
 
-    if (numEvent > maxCountPerUnit) {
+    if (count > maxCountPerUnit) {
       std::cerr << "Warning (cta" << bt.blockId << ", warp" << uid
-                << "): first " << numEvent - maxCountPerUnit
+                << "): first " << count - maxCountPerUnit
                 << " events are dropped due to insufficient buffer size ("
-                << maxCountPerUnit << "/" << numEvent << ")" << std::endl;
+                << maxCountPerUnit << "/" << count << ")" << std::endl;
     }
 
     auto &trace = bt.traces.emplace_back();

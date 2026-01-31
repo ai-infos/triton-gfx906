@@ -13,7 +13,6 @@
 #include "mlir/Pass/Pass.h"
 #include "third_party/amd/lib/TritonAMDGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/TypeConverter.h"
-#include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -36,10 +35,6 @@ public:
     addIllegalDialect<mlir::triton::proton::gpu::ProtonGPUDialect>();
     addIllegalDialect<mlir::triton::proton::ProtonDialect>();
     addLegalOp<mlir::UnrealizedConversionCastOp>();
-    addDynamicallyLegalOp<triton::gpu::GlobalScratchAllocOp>(
-        [](triton::gpu::GlobalScratchAllocOp op) {
-          return op.getBackend() != "proton";
-        });
   }
 };
 
@@ -63,8 +58,7 @@ struct ConvertProtonAMDGPUToLLVM
         typeConverter, patterns, protonTargetInfo, 1);
     mlir::triton::proton::gpu::AMD::populateProtonGPUOpAMDPatterns(
         typeConverter, patterns, protonTargetInfo, 1);
-    mlir::triton::AMD::populateMaskedOpsToLLVMPatterns(patterns,
-                                                       tritonTargetInfo);
+    mlir::triton::AMD::populateMaskedOpsToLLVMPatterns(patterns);
     mlir::arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
 
     FailureOr<mlir::amdgpu::Chipset> maybeChipset =

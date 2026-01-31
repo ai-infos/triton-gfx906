@@ -1,14 +1,15 @@
-add_library(TritonAMDGPUTestAnalysis
+add_mlir_library(TritonAMDGPUTestAnalysis
   TestAMDRangeAnalysis.cpp
   TestAMDGPUMembar.cpp
   TestAxisInfo.cpp
-)
-add_dependencies(TritonAMDGPUTestAnalysis
+
+  DEPENDS
   TritonTableGen
   TritonGPUTableGen
   TritonGPUAttrDefsIncGen
   TritonGPUTypeInterfacesIncGen
-  TritonGPUOpInterfacesIncGen
+
+  LINK_LIBS PUBLIC
+  MLIRPass
+  ${triton_libs}
 )
-target_link_libraries(TritonAMDGPUTestAnalysis MLIRPass)
-target_compile_options(TritonAMDGPUTestAnalysis PRIVATE ${TRITON_DISABLE_EH_RTTI_FLAGS})

@@ -78,24 +78,6 @@ def PTG_ReadCounterOp : PTG_Op<"read_counter", [
   }];
 }
 
-def PTG_InitializeOp : PTG_Op<"initialize", [
-    MemoryEffects<[MemWrite<GlobalMemory>]>
-]> {
-  let summary = "Initialize the intra kernel profiler";
-
-  let description = [{
-    Initialize the intra kernel profiler by filling the auxiliary metadata to the header.
-    `scratchPtr` is the base address of the profiling scratch buffer where the header is stored.
-  }];
-
-  let arguments = (ins
-    TT_Ptr:$scratchPtr
-  );
-
-  let assemblyFormat = "$scratchPtr attr-dict `:` qualified(type($scratchPtr))";
-}
-
-
 def PTG_FinalizeOp : PTG_Op<"finalize", [
     MemoryEffects<[MemRead<SharedMemory>]>, // FIXME: it shouldn't always have shared memory effects
     MemoryEffects<[MemRead<GlobalMemory>]>,
@@ -119,6 +101,32 @@ def PTG_FinalizeOp : PTG_Op<"finalize", [
   }];
 }
 
+def PTG_GlobalScratchAllocOp : PTG_Op<"global_scratch_alloc", [
+    MemoryEffects<[MemAlloc<GlobalMemory>]>
+]> {
+  let summary = "Allocate a global memory profile buffer";
+
+  let description = [{
+    This operation allocates a profile buffer in global memory.
+    Each Triton program being profiled will hold a pointer to the buffer until profiling is finalized.
+  }];
+
+  let arguments = (ins
+    I32Attr:$nbytes,
+    I32Attr:$alignment
+  );
+
+  let results = (outs TT_Ptr:$result);
+
+  let builders = [
+    OpBuilder<(ins "Type":$result, "int32_t":$nbytes, "int32_t":$alignment),
+              [{ build($_builder, $_state, result,
+                       $_builder.getI32IntegerAttr(nbytes), $_builder.getI32IntegerAttr(alignment)); }]>
+  ];
+
+  let assemblyFormat = [{attr-dict `:` qualified(type($result))}];
+}
+
 def PTG_SegmentAllocOp : PTG_Op<"segment_alloc", [Pure]> {
   let summary = "Get the base offset of the segment of the internal buffer";
 
@@ -128,7 +136,7 @@ def PTG_SegmentAllocOp : PTG_Op<"segment_alloc", [Pure]> {
   }];
 
   let arguments = (ins
-    AnyTypeOf<[TTG_MemDescType, TT_Ptr]>:$buffer
+    TTG_MemDescType:$buffer
   );
 
   let results = (outs PTG_SegmentType:$segment);
@@ -137,6 +145,7 @@ def PTG_SegmentAllocOp : PTG_Op<"segment_alloc", [Pure]> {
 
   let assemblyFormat = "$buffer attr-dict `:` qualified(type($buffer)) `->` type($segment)";
 }
+
 
 def PTG_InitCtxOp : PTG_Op<"init_ctx", [
     MemoryEffects<[MemWrite<GlobalMemory>]>

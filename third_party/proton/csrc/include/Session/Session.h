@@ -27,13 +27,11 @@ public:
 
   void activate();
 
-  void deactivate(bool flushing);
+  void deactivate();
 
   void finalize(const std::string &outputFormat);
 
   size_t getContextDepth();
-
-  Profiler *getProfiler() const { return profiler; }
 
 private:
   Session(size_t id, const std::string &path, Profiler *profiler,
@@ -76,6 +74,7 @@ public:
   ~SessionManager() = default;
 
   size_t addSession(const std::string &path, const std::string &profilerName,
+                    const std::string &profilerPath,
                     const std::string &contextSourceName,
                     const std::string &dataName, const std::string &mode);
 
@@ -87,21 +86,11 @@ public:
 
   void activateAllSessions();
 
-  void deactivateSession(size_t sessionId, bool flushing);
+  void deactivateSession(size_t sessionId);
 
-  void deactivateAllSessions(bool flushing);
+  void deactivateAllSessions();
 
   size_t getContextDepth(size_t sessionId);
-
-  std::vector<uint8_t> getDataMsgPack(size_t sessionId, size_t phase);
-
-  std::string getData(size_t sessionId, size_t phase);
-
-  void clearData(size_t sessionId, size_t phase, bool clearUpToPhase = false);
-
-  size_t advanceDataPhase(size_t sessionId);
-
-  bool isDataPhaseComplete(size_t sessionId, size_t phase);
 
   void enterScope(const Scope &scope);
 
@@ -124,29 +113,21 @@ public:
                           uint8_t *buffer, size_t size);
 
   void addMetrics(size_t scopeId,
-                  const std::map<std::string, MetricValueType> &scalarMetrics,
-                  const std::map<std::string, TensorMetric> &tensorMetrics);
-
-  void setMetricKernels(void *tensorMetricKernel, void *scalarMetricKernel,
-                        void *stream);
+                  const std::map<std::string, MetricValueType> &metrics);
 
   void setState(std::optional<Context> context);
 
 private:
-  Profiler *validateAndSetProfilerMode(Profiler *profiler,
-                                       const std::string &mode);
-
   std::unique_ptr<Session> makeSession(size_t id, const std::string &path,
                                        const std::string &profilerName,
+                                       const std::string &profilerPath,
                                        const std::string &contextSourceName,
                                        const std::string &dataName,
                                        const std::string &mode);
 
-  Session *getSessionOrThrow(size_t sessionId);
-
   void activateSessionImpl(size_t sessionId);
 
-  void deActivateSessionImpl(size_t sessionId, bool flushing);
+  void deActivateSessionImpl(size_t sessionId);
 
   size_t getSessionId(const std::string &path) { return sessionPaths[path]; }
 
@@ -230,8 +211,6 @@ private:
   // {instrumentation, active count}
   std::vector<std::pair<InstrumentationInterface *, size_t>>
       instrumentationInterfaceCounts;
-  // {metric, active count}
-  std::vector<std::pair<MetricInterface *, size_t>> metricInterfaceCounts;
   // {context source, active count}
   std::vector<std::pair<ContextSource *, size_t>> contextSourceCounts;
 };

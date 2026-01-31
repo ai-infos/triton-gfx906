@@ -136,8 +136,8 @@ Value Prefetcher::generatePrefetch(Value v, unsigned opIdx, bool isPrologue,
   if (offsetK)
     offset[kIdx] = *offsetK;
 
-  Value newSmem = triton::gpu::MemDescSubsliceOp::create(
-      builder, v.getLoc(),
+  Value newSmem = builder.create<triton::gpu::MemDescSubsliceOp>(
+      v.getLoc(),
       triton::gpu::MemDescType::get(
           shape, elementType, type.getEncoding(), type.getMemorySpace(),
           type.getMutableMemory(), type.getAllocShape()),
@@ -145,9 +145,9 @@ Value Prefetcher::generatePrefetch(Value v, unsigned opIdx, bool isPrologue,
 
   auto dotOperandEnc = triton::gpu::DotOperandEncodingAttr::get(
       builder.getContext(), opIdx, dotEncoding, prefetchWidth / 8);
-  Value prefetchSlice = triton::gpu::LocalLoadOp::create(
-      builder, v.getLoc(),
-      RankedTensorType::get(shape, elementType, dotOperandEnc), newSmem);
+  Value prefetchSlice = builder.create<triton::gpu::LocalLoadOp>(
+      v.getLoc(), RankedTensorType::get(shape, elementType, dotOperandEnc),
+      newSmem);
 
   return prefetchSlice;
 }
@@ -303,9 +303,9 @@ scf::ForOp Prefetcher::createNewForOp() {
     loopArgs.push_back(operand2headPrefetch[dot.getB()]);
   }
 
-  auto newForOp =
-      scf::ForOp::create(builder, forOp.getLoc(), forOp.getLowerBound(),
-                         forOp.getUpperBound(), forOp.getStep(), loopArgs);
+  auto newForOp = builder.create<scf::ForOp>(
+      forOp.getLoc(), forOp.getLowerBound(), forOp.getUpperBound(),
+      forOp.getStep(), loopArgs);
 
   builder.setInsertionPointToStart(newForOp.getBody());
   IRMapping mapping;
@@ -417,7 +417,7 @@ scf::ForOp Prefetcher::createNewForOp() {
   // Update ops of yield
   builder.setInsertionPointToEnd(newForOp.getBody());
   if (!yieldValues.empty())
-    scf::YieldOp::create(builder, yieldOp.getLoc(), yieldValues);
+    builder.create<scf::YieldOp>(yieldOp.getLoc(), yieldValues);
   return newForOp;
 }
 

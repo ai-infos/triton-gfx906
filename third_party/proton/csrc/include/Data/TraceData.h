@@ -12,22 +12,17 @@ public:
   TraceData(const std::string &path, ContextSource *contextSource = nullptr);
   virtual ~TraceData();
 
-  std::string toJsonString(size_t phase) const override;
+  size_t addOp(size_t scopeId, const std::string &name) override;
 
-  std::vector<uint8_t> toMsgPack(size_t phase) const override;
+  size_t addOp(size_t scopeId, const std::vector<Context> &contexts) override;
 
-  DataEntry addOp(const std::string &name) override;
-
-  DataEntry addOp(size_t phase, size_t eventId,
-                  const std::vector<Context> &contexts) override;
+  void addMetric(size_t scopeId, std::shared_ptr<Metric> metric) override;
 
   void
   addMetrics(size_t scopeId,
              const std::map<std::string, MetricValueType> &metrics) override;
 
-  void
-  addMetrics(size_t phase, size_t entryId,
-             const std::map<std::string, MetricValueType> &metrics) override;
+  void clear() override;
 
   class Trace;
 
@@ -38,19 +33,16 @@ protected:
   void exitScope(const Scope &scope) override final;
 
 private:
-  // Data
-  void doDump(std::ostream &os, OutputFormat outputFormat,
-              size_t phase) const override;
+  void doDump(std::ostream &os, OutputFormat outputFormat) const override;
+  void dumpChromeTrace(std::ostream &os) const;
 
   OutputFormat getDefaultOutputFormat() const override {
     return OutputFormat::ChromeTrace;
   }
 
-  void dumpChromeTrace(std::ostream &os, size_t phase) const;
-
-  PhaseStore<Trace> tracePhases;
-  // ScopeId -> EventId
-  std::unordered_map<size_t, size_t> scopeIdToEventId;
+  std::unique_ptr<Trace> trace;
+  // ScopeId -> ContextId
+  std::unordered_map<size_t, size_t> scopeIdToContextId;
 };
 
 } // namespace proton

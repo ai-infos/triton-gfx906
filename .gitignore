@@ -27,9 +27,7 @@ python/triton/backends/*
 !python/triton/backends/driver.py
 
 # Language extras
-python/triton/language/extra/*
-!python/triton/language/extra/__init__.py
-!python/triton/language/extra/libdevice.py
+python/triton/language/extra
 
 # Tools extras
 python/triton/tools/extra
@@ -37,11 +35,11 @@ python/triton/tools/extra
 # Proton
 python/triton/profiler
 
+# Pytest
+pytest.ini
+
 # Instrumentation
 python/triton/instrumentation
-
-# MLIR Plugin
-python/triton/plugins
 
 # Python caches
 __pycache__/
@@ -65,7 +63,6 @@ cmake-build-*
 cuobjdump
 nvdisasm
 ptxas
-ptxas-blackwell
 
 # Third-party include
 third_party/nvidia/backend/include
@@ -86,7 +83,6 @@ docs/sg_execution_times.rst
 /compile_commands.json
 .vscode
 .vs
-.cursor
 
 # Vim
 *.swp

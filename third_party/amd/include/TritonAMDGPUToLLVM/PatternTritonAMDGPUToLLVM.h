@@ -2,7 +2,6 @@
 #define TRITON_THIRD_PARTY_AMD_INCLUDE_TRITONAMDGPUTOLLVM_PATTERNTRITONAMDGPUTOLLVM_H_
 
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
-#include "third_party/amd/lib/TritonAMDGPUToLLVM/TargetInfo.h"
 
 namespace mlir::triton::AMD {
 
@@ -15,10 +14,6 @@ void populateInThreadTransposeOpToTTGPatterns(mlir::RewritePatternSet &patterns,
 void populateConcatOpToLLVMPatterns(mlir::LLVMTypeConverter &typeConverter,
                                     mlir::RewritePatternSet &patterns,
                                     mlir::PatternBenefit benefit);
-
-void populateScaledUpcastOpToLLVMPatterns(
-    mlir::LLVMTypeConverter &typeConverter, mlir::RewritePatternSet &patterns,
-    const AMD::TargetInfo &targetInfo, mlir::PatternBenefit benefit);
 
 } // namespace mlir::triton::AMD
 

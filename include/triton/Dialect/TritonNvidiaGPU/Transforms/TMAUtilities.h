@@ -16,8 +16,12 @@ inline bool isFp4Padded(Attribute encoding) {
   return mmaEnc && mmaEnc.getFp4Padded();
 }
 
-gpu::CGAEncodingAttr updateCGALayoutForShape(gpu::CGAEncodingAttr cgaLayout,
-                                             ArrayRef<int64_t> shape);
+SmallVector<Value> translateTMAIndices(OpBuilder &builder, Location loc,
+                                       Attribute encoding,
+                                       SmallVector<Value> indices);
+
+gpu::CTALayoutAttr updateCTALayoutForShape(gpu::CTALayoutAttr ctaLayout,
+                                           ArrayRef<int64_t> shape);
 
 gpu::SharedEncodingTrait
 updateEncodingForShape(Operation *op, gpu::SharedEncodingTrait encoding,
@@ -27,13 +31,18 @@ triton::gpu::SharedEncodingTrait
 getEncodingFromDescriptor(Operation *op, RankedTensorType tensorType,
                           Value desc);
 
+SmallVector<int64_t> getTMABlockShape(ArrayRef<int64_t> shapePerCTA,
+                                      int elementBitWidth, int swizzleBytes,
+                                      bool fp4Padded, bool transposed,
+                                      bool packedSize);
+
 inline SmallVector<int64_t> getTMABlockShape(Attribute encoding,
                                              ArrayRef<int64_t> shapePerCTA,
                                              bool packedSize) {
   auto mmaEnc = cast<gpu::NVMMASharedEncodingAttr>(encoding);
-  return triton::gpu::getTMABlockShape(
-      shapePerCTA, mmaEnc.getElementBitWidth(), mmaEnc.getSwizzlingByteWidth(),
-      mmaEnc.getFp4Padded(), mmaEnc.getTransposed(), packedSize);
+  return getTMABlockShape(shapePerCTA, mmaEnc.getElementBitWidth(),
+                          mmaEnc.getSwizzlingByteWidth(), mmaEnc.getFp4Padded(),
+                          mmaEnc.getTransposed(), packedSize);
 }
 
 inline SmallVector<int64_t> getTMABlockShape(RankedTensorType ty,
@@ -48,8 +57,9 @@ inline SmallVector<int64_t> getTMABlockShape(triton::gpu::MemDescType ty,
   return getTMABlockShape(ty.getEncoding(), shapePerCTA, packedSize);
 }
 
-FailureOr<int> getTMASwizzleMode(Location loc, TensorDescType ty);
-FailureOr<int> getTMAElementType(Location loc, TensorDescType ty);
+std::optional<int> getTMASwizzleMode(Operation *op, TensorDescType ty);
+
+std::optional<int> getTMAElementType(Operation *op, TensorDescType ty);
 
 LogicalResult createTMADesc(Value tmaPtr, MakeTensorDescOp op,
                             OpBuilder &builder);

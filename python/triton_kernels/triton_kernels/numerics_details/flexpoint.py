@@ -115,7 +115,9 @@ def flex_to_float(x, scale_ptr):
 
 @triton.jit
 def clip(x, limit):
-    return tl.clamp(x, -limit, limit)
+    res = tl.minimum(x, limit)
+    res = tl.maximum(-limit, res)
+    return res
 
 
 @triton.jit

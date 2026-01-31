@@ -46,9 +46,6 @@ LogicalResult lowerLdStMatrix(
       return result;
     }
   }
-  if (isa<PaddedSharedEncodingAttr>(memDescType.getEncoding())) {
-    return failure();
-  }
   auto memLayout = toLinearLayout(memDescType);
   auto cvt = regLayout.invertAndCompose(memLayout);
   auto kBlock = StringAttr::get(loc.getContext(), "block");

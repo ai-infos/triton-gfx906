@@ -6,7 +6,6 @@
 #include "Dialect/Proton/IR/Dialect.h"
 #include "Dialect/ProtonGPU/IR/Dialect.h"
 #include "Dialect/ProtonGPU/Transforms/Passes.h"
-#include "ir.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/PassManager.h"
 #include "passes.h"
@@ -74,11 +73,12 @@ void init_triton_proton(py::module &&m) {
 
   // Proton operations
   m.def("create_proton_record",
-        [](TritonOpBuilder &opBuilder, bool isStart,
+        [](mlir::OpBuilder &opBuilder, bool isStart,
            const std::string &name) -> void {
           auto nameAttr = mlir::StringAttr::get(opBuilder.getContext(),
                                                 llvm::StringRef(name));
-          opBuilder.create<proton::RecordOp>(isStart, nameAttr);
+          auto loc = opBuilder.getUnknownLoc();
+          opBuilder.create<proton::RecordOp>(loc, isStart, nameAttr);
         });
 
   m.def("add_convert_proton_to_protongpu",

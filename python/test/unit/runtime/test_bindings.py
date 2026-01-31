@@ -4,8 +4,6 @@ import triton.language as tl
 import torch
 import math
 
-_BLOCK_SIZE = 16
-
 
 @triton.jit
 def add_helper(x, y):
@@ -52,12 +50,6 @@ def test_module_walk(device):
             op.get_str_attr("sym_name")
         if name == "tt.call":
             op.get_flat_symbol_ref_attr("callee")
-        if name == "tt.make_range":
-            assert 0 == op.get_int_attr("start")
-            assert _BLOCK_SIZE == op.get_int_attr("end")
-        if name == "arith.constant":
-            val = op.get_int_attr("value")
-            assert val is None or isinstance(val, int)
 
     kernel = add_kernel
     args = [
@@ -65,7 +57,7 @@ def test_module_walk(device):
         torch.empty((32, 32), device=device),  # in_ptr1
         1024,  # n_elements
         torch.empty((32, 32), device=device),  # out_ptr
-        _BLOCK_SIZE,  # BLOCK_SIZE
+        16,  # BLOCK_SIZE
     ]
     target = triton.runtime.driver.active.get_current_target()
     backend = triton.compiler.compiler.make_backend(target)

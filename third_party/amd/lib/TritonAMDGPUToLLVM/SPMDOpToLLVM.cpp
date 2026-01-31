@@ -20,7 +20,7 @@ struct GetNumProgramsOpConversion
     Location loc = op->getLoc();
     assert(op.getAxisAsInt() < 3);
     Value blockId =
-        ::mlir::gpu::GridDimOp::create(rewriter, loc, dims[op.getAxisAsInt()]);
+        rewriter.create<::mlir::gpu::GridDimOp>(loc, dims[op.getAxisAsInt()]);
     rewriter.replaceOpWithNewOp<arith::TruncIOp>(op, i32_ty, blockId);
     return success();
   }
@@ -39,13 +39,13 @@ struct CondBarrierOpConversion
         rewriter.splitBlock(currentBlock, rewriter.getInsertionPoint());
     Block *trueBlock = rewriter.createBlock(afterCondBarBlock);
     rewriter.setInsertionPointToEnd(currentBlock);
-    LLVM::CondBrOp::create(rewriter, loc, adaptor.getPred(), trueBlock,
-                           afterCondBarBlock);
+    rewriter.create<LLVM::CondBrOp>(loc, adaptor.getPred(), trueBlock,
+                                    afterCondBarBlock);
 
     // conditional barrier
     rewriter.setInsertionPointToStart(trueBlock);
-    ROCDL::SBarrierOp::create(rewriter, loc);
-    LLVM::BrOp::create(rewriter, loc, afterCondBarBlock);
+    rewriter.create<ROCDL::SBarrierOp>(loc);
+    rewriter.create<LLVM::BrOp>(loc, afterCondBarBlock);
     rewriter.eraseOp(op);
     return success();
   }

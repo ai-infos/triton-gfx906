@@ -40,10 +40,7 @@ bool isPureScalarOp(Operation *op);
 bool getDominatingValueSetOpsToHoist(
     DominanceInfo &domInfo, Operation *refOp, ArrayRef<Value> valueSet,
     llvm::SetVector<Operation *> &toHoist,
-    function_ref<bool(Operation *)> canHoist = isPureScalarOp,
-    function_ref<bool(BlockArgument)> canUseArg = [](BlockArgument) {
-      return false;
-    });
+    function_ref<bool(Operation *)> canHoist = isPureScalarOp);
 
 // Hoist the given set of operations above the reference operation.
 void hoistOpsBefore(Operation *refOp,
@@ -77,7 +74,8 @@ Operation *wrapInMaskOp(RewriterBase &rewriter, Operation *op, Value pred);
 
 // Utilize high level predication abstraction to perform optimizations before
 // lowering to predicated operations
-void resolveMaskOp(ModuleOp moduleOp);
+void resolveMaskOp(ModuleOp moduleOp,
+                   DenseSet<triton::gpu::MaskOp> &peeledMaskOps);
 
 // Return true if the given ForOp has the attribute
 // `tt.disallow_acc_multi_buffer` set to true.
@@ -181,8 +179,6 @@ getLastUseOfPipelinedOp(ArrayRef<Operation *> ops, scf::ForOp forOp,
                         CoarseSchedule &schedule,
                         std::function<bool(Operation *)> filterUse = nullptr);
 
-// Clean up attributes passing over schedules across stages in pipelining
-void removePipeliningAttributes(ModuleOp moduleOp);
 } // namespace triton
 } // namespace mlir
 

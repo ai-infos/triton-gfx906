@@ -1,9 +1,7 @@
-#include "Dialect/NVWS/IR/Dialect.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 #include "nvidia/hopper/include/Transforms/Passes.h"
-#include "nvidia/include/Dialect/NVWS/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 
@@ -31,8 +29,7 @@ public:
   void runOnFuncOp(triton::FuncOp funcOp) {
     SmallVector<scf::ForOp> loops;
     funcOp->walk([&](scf::ForOp forOp) {
-      if (forOp->hasAttr(mlir::triton::kWarpSpecializeAttrName) &&
-          triton::getNumStagesOrDefault(forOp, numStages) > 1)
+      if (forOp->hasAttr(mlir::triton::kWarpSpecializeAttrName))
         loops.push_back(forOp);
     });
     if (loops.empty())
@@ -90,12 +87,8 @@ public:
       }
       // Clear async_task.
     }
-    if (!success) {
-      mlir::emitError(
-          getOperation()->getLoc(),
-          "failed to partition the function into warp-specialized code");
-      return signalPassFailure();
-    }
+    if (!success)
+      signalPassFailure();
 
     doCodePartition(funcOp, numStages);
     if (dumpIntermediateSteps) {
@@ -112,9 +105,6 @@ public:
   }
 
   void runOnOperation() override {
-    if (numStages <= 1)
-      return;
-
     getOperation()->walk([&](triton::FuncOp funcOp) { runOnFuncOp(funcOp); });
   }
 };

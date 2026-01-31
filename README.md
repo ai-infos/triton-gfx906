@@ -1,24 +1,10 @@
+<div align="center">
+  <img src="https://lh5.googleusercontent.com/wzQKEsTFkrgNQO9JjhGH5wFvslJr1saLtLaJ_a6Fp_gNENpvt3VG7BmztwngU9hFJaU4CPwGiw1opQtDvTkLrxWRbO_a12Q-pdESWHgtmheIHcPbOL5ZMC4TSiJVe5ty1w=w3517" alt="Triton logo">
+</div>
 
 | **`Documentation`** | **`Nightly Wheels`** |
 |-------------------- | -------------------- |
 | [![Documentation](https://github.com/triton-lang/triton/actions/workflows/documentation.yml/badge.svg)](https://triton-lang.org/) | [![Wheels](https://github.com/triton-lang/triton/actions/workflows/wheels.yml/badge.svg)](https://github.com/triton-lang/triton/actions/workflows/wheels.yml) |
-
-# Triton Conference 2025
-
-![Triton Banner](https://github.com/user-attachments/assets/b4b6972a-857c-417f-bf2c-f16f38a358c0)
-
-The 3rd Triton Developer Conference took place on October 21, 2025 at the Microsoft Silicon Valley Campus in Mountain View, California.
-
-### Conference Materials
-
-Conference recordings and materials are now available online:
-
-- **Conference Videos:** [YouTube Playlist](https://www.youtube.com/playlist?list=PLc_vA1r0qoiQqCdWFDUDqI90oY5EjfGuO)
-- **Conference Slides:** [Google Drive Folder](https://drive.google.com/drive/folders/1KB6tD3UM1J0_eUp-F-JSlGrargLBawIr)
-
-For previous conference materials, see:
-- [2024 Conference Materials](docs/meetups/dev_conference_2024.md)
-- [2023 Conference Materials](docs/meetups/dev-meetup-2023.md)
 
 # Triton
 
@@ -241,10 +227,6 @@ See [`python/triton/knobs.py`](python/triton/knobs.py) for the full list of conf
 - `TRITON_F32_DEFAULT` sets the default input precision of `tl.dot` when using 32-bit floats, which can be either `ieee`, `tf32`, or `tf32x3`.
 - `TRITON_FRONT_END_DEBUGGING=1` disables exception wrapping when an error occurs in the compiler frontend, allowing the full stack trace to be seen.
 - `TRITON_DISABLE_LINE_INFO=1` removes all line information from the module.
-- `PTXAS_OPTIONS` passes additional command-line options to the PTX assembler `ptxas` (only on NVIDIA).
-- `LLVM_EXTRACT_DI_LOCAL_VARIABLES` emit full debug info, allowing for eval of values in gpu debuggers (ie cuda-gdb, rocm-gdb etc)
-- `TRITON_DEFAULT_BACKEND=<backend>` optionally sets the default backend used by Triton when
-  constructing the active driver (i.e., `triton.runtime.driver.active`).
 
 > [!NOTE]
 > Some of these environment variables don't have a knob in `knobs.py`-- those are only relevant to the C++ layer(s), hence they don't exist in the python layer.
@@ -263,16 +245,7 @@ export TRITON_OVERRIDE_DIR=<override_dir>
 # Step 4: Run the kernel again to see the overridden result
 ```
 
-**Compiler Pipeline Inspection Steps**
-To introspect the pipeline `add_stages`, before running your kernels, simply set
-the add_stages_inspection_hook like so:
 
-```python
-def inspect_stages(_self, stages, options, language, capability):
-    # inspect or modify add_stages here
-triton.knobs.runtime.add_stages_inspection_hook = inspect_stages
-```
-Examples of how to use this for out of tree plugin passes is [here](lib/Plugins/README.md)
 # Changelog
 
 Version 2.0 is out! New features include:

@@ -22,8 +22,6 @@ def _is_power_of_two(i):
     return (i & (i - 1)) == 0 and i != 0
 
 
-_get_int_dtype = constexpr_function(core.get_int_dtype)
-
 # -----------------------
 # Standard library
 # -----------------------
@@ -40,7 +38,7 @@ def cdiv(x, div):
     :param div: the divisor
     :type div: Block
     """
-    return (x + (div - 1)) // div
+    return (x + div - 1) // div
 
 
 @core._tensor_member_fn
@@ -376,7 +374,7 @@ def _compare_and_swap(x, flip, i: core.constexpr):
     n_dims: core.constexpr = _log2(x.numel)
 
     # flip along middle dimension (the bitwise XORs will be optimised away):
-    idtype = _get_int_dtype(bitwidth=x.dtype.primitive_bitwidth, signed=True)
+    idtype = core.get_int_dtype(bitwidth=x.dtype.primitive_bitwidth, signed=True)
     ix = x.to(idtype, bitcast=True)
     iy = ix ^ xor_sum(ix, n_dims - 1 - i, True)
     y = iy.to(x.dtype, bitcast=True)
@@ -443,7 +441,7 @@ def sort_impl(x, k: core.constexpr = None, dim: core.constexpr = None, descendin
     n_dims: core.constexpr = _log2(x.numel)
 
     # reshape to hypercube:
-    h = core.reshape(x, [2] * n_dims if n_dims else [1])
+    h = core.reshape(x, [2] * n_dims)
 
     # run first log_k bitonic sort iterations:
     for i in core.static_range(1, log_k + 1):
@@ -505,7 +503,7 @@ def flip(x, dim=None):
     steps: core.constexpr = _log2(x.shape[_dim])
 
     # reshape the swap dimension to (2, 2, ..., 2)
-    idtype = _get_int_dtype(bitwidth=x.dtype.primitive_bitwidth, signed=True)
+    idtype = core.get_int_dtype(bitwidth=x.dtype.primitive_bitwidth, signed=True)
     y = core.reshape(x.to(idtype, bitcast=True), x.shape[:_dim] + [2] * steps + x.shape[_dim + 1:])
     for i in core.static_range(steps):
         y = y ^ xor_sum(y, _dim + i, True)
@@ -534,14 +532,3 @@ def interleave(a, b):
         # understand that if we take the `if` above we definitely don't run this
         # `else`.
         return core.reshape(c, c.shape[:-2] + [2 * c.shape[-2]])
-
-
-@jit
-def squeeze(x, dim: core.constexpr):
-    core.static_assert(x.shape[dim] == 1)
-    return x.reshape(x.shape[:dim] + x.shape[dim + 1:])
-
-
-@jit
-def unsqueeze(x, dim: core.constexpr):
-    return x.reshape(x.shape[:dim] + (1, ) + x.shape[dim:])

@@ -2,27 +2,17 @@
 #include "pybind11/pybind11.h"
 #include <pybind11/stl.h>
 
-#include <optional>
-#include <stdexcept>
-
-#include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/DialectRegistry.h"
 #include "mlir/IR/Types.h"
 #include "third_party/amd/include/Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/Gluon/IR/Dialect.h"
-#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Attributes.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
-#include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
-#include "triton/Tools/GenericSwizzling.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/LinearLayout.h"
-#include "llvm/ADT/StringSwitch.h"
-#include "llvm/Support/MathExtras.h"
 
 using namespace mlir;
 namespace py = pybind11;
@@ -31,29 +21,6 @@ namespace ttg = triton::gpu;
 namespace ttng = triton::nvidia_gpu;
 namespace gluon = mlir::triton::gluon;
 namespace ttag = mlir::triton::amdgpu;
-
-static ttg::CGAEncodingAttr
-buildCgaLayoutAttr(MLIRContext *ctx,
-                   const std::vector<std::vector<int32_t>> &layout,
-                   unsigned rank) {
-  auto kBlock = StringAttr::get(ctx, "block");
-  tt::LinearLayout::BasesT bases;
-  bases[kBlock] = layout;
-  auto outDims = tt::standardOutDimNames(ctx, rank);
-  tt::LinearLayout ll(std::move(bases), outDims);
-  return ttg::CGAEncodingAttr::get(ctx, std::move(ll));
-}
-
-static std::vector<std::vector<int32_t>>
-getCgaLayoutBases(ttg::CGAEncodingAttr layout) {
-  std::vector<std::vector<int32_t>> result;
-  auto ctx = layout.getContext();
-  auto block = StringAttr::get(ctx, "block");
-  const auto &basesMap = layout.getLinearLayout().getBases();
-  auto it = basesMap.find(block);
-  assert(it != basesMap.end());
-  return it->second;
-}
 
 // Helper to check if an MLIR type or attribute has a verifier method.
 template <typename AttrOrType>
@@ -74,7 +41,6 @@ static void printDiagStr(llvm::raw_ostream &os, const Diagnostic &diag) {
 }
 
 struct GluonOpBuilder : public TritonOpBuilder {
-  using TritonOpBuilder::TritonOpBuilder;
   // Construct an attribute or type while calling its verifier. Error messages
   // are intercepted and sent back to Python via a C++ exception.
   template <typename AttrOrType, typename... ArgTs>
@@ -106,7 +72,8 @@ struct GluonOpBuilder : public TritonOpBuilder {
         getContext(), [&](Diagnostic &diag) { printDiagStr(os, diag); });
 
     if (failed(AttrOrType::verifyInvariants(
-            [&] { return mlir::emitError(getLastLoc()); }, args...)))
+            [&] { return mlir::emitError(getLastLoc()); },
+            std::forward<ArgTs>(args)...)))
       throw std::runtime_error(os.str());
 
     return AttrOrType::get(ctx, std::forward<ArgTs>(args)...);
@@ -122,30 +89,23 @@ struct GluonOpBuilder : public TritonOpBuilder {
 
 struct GluonLayouts {
   py::handle AutoLayout;
-  py::handle CoalescedLayout;
   py::handle BlockedLayout;
   py::handle SliceLayout;
   py::handle DistributedLinearLayout;
   py::handle DotOperandLayout;
   py::handle NVMMADistributedLayout;
-  py::handle TensorMemoryScalesLayout;
-  py::handle TensorMemoryLayout;
   py::handle NVMMASharedLayout;
   py::handle SwizzledSharedLayout;
-  py::handle SharedLinearLayout;
   py::handle AMDMFMALayout;
-  py::handle AMDWMMALayout;
   py::handle PaddedSharedLayout;
+  py::handle GluonDType;
 
   GluonLayouts() {
     auto layouts =
         py::module::import("triton.experimental.gluon.language._layouts");
     auto amdLayouts =
         py::module::import("triton.experimental.gluon.language.amd._layouts");
-    auto blackwellLayouts = py::module::import(
-        "triton.experimental.gluon.language.nvidia.blackwell");
     AutoLayout = py::object(layouts.attr("AutoLayout")).release();
-    CoalescedLayout = py::object(layouts.attr("CoalescedLayout")).release();
     BlockedLayout = py::object(layouts.attr("BlockedLayout")).release();
     SliceLayout = py::object(layouts.attr("SliceLayout")).release();
     DistributedLinearLayout =
@@ -153,21 +113,15 @@ struct GluonLayouts {
     DotOperandLayout = py::object(layouts.attr("DotOperandLayout")).release();
     NVMMADistributedLayout =
         py::object(layouts.attr("NVMMADistributedLayout")).release();
-    TensorMemoryScalesLayout =
-        py::object(blackwellLayouts.attr("TensorMemoryScalesLayout")).release();
-    TensorMemoryLayout =
-        py::object(blackwellLayouts.attr("TensorMemoryLayout")).release();
     NVMMASharedLayout = py::object(layouts.attr("NVMMASharedLayout")).release();
     SwizzledSharedLayout =
         py::object(layouts.attr("SwizzledSharedLayout")).release();
-    SharedLinearLayout =
-        py::object(layouts.attr("SharedLinearLayout")).release();
     AMDMFMALayout = py::object(amdLayouts.attr("AMDMFMALayout")).release();
-    AMDWMMALayout = py::object(amdLayouts.attr("AMDWMMALayout")).release();
     PaddedSharedLayout =
         py::object(layouts.attr("PaddedSharedLayout")).release();
 
     auto core = py::module::import("triton.language.core");
+    GluonDType = py::object(core.attr("dtype")).release();
   }
 };
 
@@ -187,24 +141,26 @@ static bool isConvertLayoutTrivial(RankedTensorType dstTy, Value value) {
   return dims.empty() || (dims.size() == 1 && dims.front() == "register");
 }
 
-template <typename R>
-std::vector<llvm::ValueTypeFromRangeType<R>> toStdVector(R &&range) {
-  return {range.begin(), range.end()};
+template <typename T> std::vector<T> toStdVector(llvm::ArrayRef<T> array) {
+  return std::vector<T>(array.begin(), array.end());
 }
 
 py::object layoutToGluon(Attribute layout) {
   static GluonLayouts layouts;
   if (auto blocked = dyn_cast<ttg::BlockedEncodingAttr>(layout)) {
-    auto cgaBases = getCgaLayoutBases(blocked.getCGALayout());
+    auto ctaLayout = blocked.getCTALayout();
     return layouts.BlockedLayout(toStdVector(blocked.getSizePerThread()),
                                  toStdVector(blocked.getThreadsPerWarp()),
                                  toStdVector(blocked.getWarpsPerCTA()),
-                                 toStdVector(blocked.getOrder()), cgaBases);
+                                 toStdVector(blocked.getOrder()),
+                                 toStdVector(ctaLayout.getCTAsPerCGA()),
+                                 toStdVector(ctaLayout.getCTASplitNum()),
+                                 toStdVector(ctaLayout.getCTAOrder()));
   } else if (auto sliced = dyn_cast<ttg::SliceEncodingAttr>(layout)) {
     return layouts.SliceLayout(sliced.getDim(),
                                layoutToGluon(sliced.getParent()));
   } else if (auto linear = dyn_cast<ttg::LinearEncodingAttr>(layout)) {
-    const auto &ll = linear.getLinearLayout();
+    auto ll = linear.getLinearLayout();
     auto ctx = layout.getContext();
     auto kReg = mlir::StringAttr::get(ctx, "register");
     auto kLane = mlir::StringAttr::get(ctx, "lane");
@@ -213,100 +169,81 @@ py::object layoutToGluon(Attribute layout) {
     return layouts.DistributedLinearLayout(
         ll.getBases().lookup(kReg), ll.getBases().lookup(kLane),
         ll.getBases().lookup(kWarp), ll.getBases().lookup(kBlock),
-        toStdVector(ll.getOutDimSizes()));
+        toStdVector(ArrayRef(llvm::to_vector(ll.getOutDimSizes()))));
   } else if (auto dotOp = dyn_cast<ttg::DotOperandEncodingAttr>(layout)) {
     return layouts.DotOperandLayout(
         dotOp.getOpIdx(), layoutToGluon(dotOp.getParent()), dotOp.getKWidth());
   } else if (auto mma = dyn_cast<ttg::NvidiaMmaEncodingAttr>(layout)) {
-    auto cgaBases = getCgaLayoutBases(mma.getCGALayout());
+    auto ctaLayout = mma.getCTALayout();
     return layouts.NVMMADistributedLayout(
         std::vector<unsigned>{mma.getVersionMajor(), mma.getVersionMinor()},
         toStdVector(mma.getWarpsPerCTA()), toStdVector(mma.getInstrShape()),
-        cgaBases);
+        toStdVector(ctaLayout.getCTAsPerCGA()),
+        toStdVector(ctaLayout.getCTASplitNum()),
+        toStdVector(ctaLayout.getCTAOrder()));
   } else if (auto nvmma = dyn_cast<ttg::NVMMASharedEncodingAttr>(layout)) {
-    auto cgaLayout = nvmma.getCGALayout();
-    auto cgaBases = getCgaLayoutBases(cgaLayout);
-    return layouts.NVMMASharedLayout(nvmma.getSwizzlingByteWidth(),
-                                     nvmma.getElementBitWidth(),
-                                     cgaLayout.getRank(), nvmma.getTransposed(),
-                                     nvmma.getFp4Padded(), cgaBases);
+    auto ctaLayout = nvmma.getCTALayout();
+    return layouts.NVMMASharedLayout(
+        nvmma.getSwizzlingByteWidth(), nvmma.getElementBitWidth(),
+        ctaLayout.getRank(), nvmma.getTransposed(), nvmma.getFp4Padded(),
+        toStdVector(ctaLayout.getCTAsPerCGA()),
+        toStdVector(ctaLayout.getCTASplitNum()),
+        toStdVector(ctaLayout.getCTAOrder()));
   } else if (auto swizzled =
                  dyn_cast<ttg::SwizzledSharedEncodingAttr>(layout)) {
-    auto cgaBases = getCgaLayoutBases(swizzled.getCGALayout());
+    auto ctaLayout = nvmma.getCTALayout();
     return layouts.SwizzledSharedLayout(
         swizzled.getVec(), swizzled.getPerPhase(), swizzled.getMaxPhase(),
-        toStdVector(swizzled.getOrder()), cgaBases);
-  } else if (auto sharedLl = dyn_cast<ttg::SharedLinearEncodingAttr>(layout)) {
-    const auto &ll = sharedLl.getLinearLayout();
-    auto ctx = layout.getContext();
-    auto kOffset = mlir::StringAttr::get(ctx, "offset");
-    auto kBlock = mlir::StringAttr::get(ctx, "block");
-    return layouts.SharedLinearLayout(
-        toStdVector(ll.getBases().lookup(kOffset)),
-        toStdVector(ll.getBases().lookup(kBlock)), sharedLl.getAlignment());
+        swizzled.getOrder(), toStdVector(ctaLayout.getCTAsPerCGA()),
+        toStdVector(ctaLayout.getCTASplitNum()),
+        toStdVector(ctaLayout.getCTAOrder()));
   } else if (auto autoEnc = dyn_cast<gluon::AutoEncodingAttr>(layout)) {
     return layouts.AutoLayout();
-  } else if (auto autoEnc = dyn_cast<gluon::CoalescedEncodingAttr>(layout)) {
-    return layouts.CoalescedLayout();
   } else if (auto amdMfma = dyn_cast<ttg::AMDMfmaEncodingAttr>(layout)) {
-    auto cgaBases = getCgaLayoutBases(amdMfma.getCGALayout());
+    auto ctaLayout = amdMfma.getCTALayout();
+    std::vector<unsigned> instrShape{amdMfma.getMDim(), amdMfma.getNDim()};
+    auto elemTypeOpt = amdMfma.getElementType();
+    const char *typeName = "fp32";
+    if (elemTypeOpt.has_value()) {
+      auto elemType = elemTypeOpt.value();
+      if (elemType.isF64()) {
+        typeName = "fp64";
+      } else if (elemType.isF32()) {
+        typeName = "fp32";
+      } else {
+        // The AMDMfmaEncodingAttr mlir attribute has already verified element
+        // type is fp64, fp32 or int32; so, the typeName here must be int32.
+        typeName = "int32";
+      }
+    }
+
     return layouts.AMDMFMALayout(
-        amdMfma.getVersion(), toStdVector(amdMfma.getInstrShape()),
-        amdMfma.getIsTransposed(), toStdVector(amdMfma.getWarpsPerCTA()),
-        amdMfma.getElementBitWidth(), toStdVector(amdMfma.getTilesPerWarp()),
-        cgaBases);
-  } else if (auto amdWmma = dyn_cast<ttg::AMDWmmaEncodingAttr>(layout)) {
-    auto cgaBases = getCgaLayoutBases(amdWmma.getCGALayout());
-    const auto &ctaLayout = amdWmma.getCtaLayout();
-    auto ctx = layout.getContext();
-    auto kReg = mlir::StringAttr::get(ctx, "register");
-    auto kWarp = mlir::StringAttr::get(ctx, "warp");
-    return layouts.AMDWMMALayout(
-        amdWmma.getVersion(), amdWmma.getIsTransposed(),
-        ctaLayout.getBases().lookup(kWarp), ctaLayout.getBases().lookup(kReg),
-        toStdVector(amdWmma.getInstrShape()), cgaBases, amdWmma.getRank());
+        amdMfma.getVersion(), instrShape, amdMfma.getIsTransposed(),
+        toStdVector(amdMfma.getWarpsPerCTA()), layouts.GluonDType(typeName),
+        toStdVector(amdMfma.getTilesPerWarp()),
+        toStdVector(ctaLayout.getCTAsPerCGA()),
+        toStdVector(ctaLayout.getCTASplitNum()),
+        toStdVector(ctaLayout.getCTAOrder()));
   } else if (auto paddedShared =
                  dyn_cast<ttg::PaddedSharedEncodingAttr>(layout)) {
-    auto *ctx = paddedShared.getContext();
+    auto ctaLayout = paddedShared.getCTALayout();
     std::vector<std::pair<unsigned, unsigned>> intervalPaddingPairs;
     for (auto [interval, padding] :
          llvm::zip(paddedShared.getIntervals(), paddedShared.getPaddings())) {
       intervalPaddingPairs.push_back({interval, padding});
     }
-    auto kOffset = mlir::StringAttr::get(ctx, "offset");
-    auto kBlock = mlir::StringAttr::get(ctx, "block");
-    const auto &ll = paddedShared.getLinearComponent();
-    auto shape = toStdVector(ll.getOutDimSizes());
     return layouts.PaddedSharedLayout(intervalPaddingPairs,
-                                      ll.getBases().lookup(kOffset),
-                                      ll.getBases().lookup(kBlock), shape);
-  } else if (auto tmemScales =
-                 dyn_cast<ttng::TensorMemoryScalesEncodingAttr>(layout)) {
-    return layouts.TensorMemoryScalesLayout(std::vector<unsigned>{
-        tmemScales.getCTASplitM(), tmemScales.getCTASplitN()});
-  } else if (auto tmem = dyn_cast<ttng::TensorMemoryEncodingAttr>(layout)) {
-    return layouts.TensorMemoryLayout(
-        std::vector<unsigned>{tmem.getBlockM(), tmem.getBlockN()},
-        tmem.getColStride(),
-        std::vector<unsigned>{tmem.getCTASplitM(), tmem.getCTASplitN()});
+                                      toStdVector(paddedShared.getOrder()),
+                                      toStdVector(ctaLayout.getCTAsPerCGA()),
+                                      toStdVector(ctaLayout.getCTASplitNum()),
+                                      toStdVector(ctaLayout.getCTAOrder()));
   }
 
   throw py::value_error("Unhandled encoding encountered");
 }
 
-template <typename CondT> static void check(CondT &&cond, const char *msg) {
-  if (!std::forward<CondT>(cond))
-    throw py::value_error(msg);
-}
-
 void init_gluon_ir(py::module &&m) {
   using ret = py::return_value_policy;
-
-  py::enum_<ttng::TMEMLoadReduceModifier>(m, "TMEM_LOAD_REDUCE_MODIFIER",
-                                          py::module_local())
-      .value("MIN", ttng::TMEMLoadReduceModifier::MIN)
-      .value("MAX", ttng::TMEMLoadReduceModifier::MAX)
-      .export_values();
 
   py::class_<GluonOpBuilder, TritonOpBuilder>(
       m, "GluonOpBuilder", py::module_local(), py::dynamic_attr())
@@ -344,13 +281,15 @@ void init_gluon_ir(py::module &&m) {
            [](GluonOpBuilder &self, std::vector<unsigned> &sizePerThread,
               std::vector<unsigned> &threadsPerWarp,
               std::vector<unsigned> &warpsPerCta, std::vector<unsigned> &order,
-              std::vector<std::vector<int32_t>> &cgaBases) -> Attribute {
+              std::vector<unsigned> &ctasPerCga,
+              std::vector<unsigned> &ctaSplitNum,
+              std::vector<unsigned> &ctaOrder) -> Attribute {
              auto ctx = self.getContext();
-             unsigned rank = order.size();
-             auto cgaLayout = buildCgaLayoutAttr(ctx, cgaBases, rank);
+             auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
+                 ctx, ctasPerCga, ctaSplitNum, ctaOrder);
              return self.getChecked<ttg::BlockedEncodingAttr>(
                  ctx, sizePerThread, threadsPerWarp, warpsPerCta, order,
-                 cgaLayout);
+                 ctaLayout);
            })
       .def("get_slice_layout",
            [](GluonOpBuilder &self, unsigned dim,
@@ -377,55 +316,7 @@ void init_gluon_ir(py::module &&m) {
                                          {kBlock, blockBases}},
                                         outDims,
                                         /*requiresSurjective=*/true);
-             return ttg::LinearEncodingAttr::get(ctx, std::move(ll));
-           })
-      .def("to_linear_layout",
-           [](GluonOpBuilder &self, Attribute layout,
-              std::vector<int64_t> &shape) -> py::object {
-             auto ctx = self.getContext();
-             auto linearLayout = ttg::toLinearLayout(shape, layout);
-
-             if (isa<ttg::DistributedEncodingTrait>(layout)) {
-               auto attr =
-                   ttg::LinearEncodingAttr::get(ctx, std::move(linearLayout));
-               return layoutToGluon(attr);
-             }
-             if (isa<ttg::SharedEncodingTrait>(layout)) {
-               auto alignment =
-                   cast<ttg::SharedEncodingTrait>(layout).getAlignment();
-               auto attr = ttg::SharedLinearEncodingAttr::get(
-                   ctx, std::move(linearLayout), alignment);
-               return layoutToGluon(attr);
-             }
-
-             // TensorMemory encodings: keep the LinearLayout but wrap as
-             // print-only Python object carrying row/col bases -> dim0/dim1.
-             auto inNamesRange = linearLayout.getInDimNames();
-             auto inNames = llvm::to_vector(inNamesRange);
-             bool isTmemLayout =
-                 (inNames.size() == 2 && inNames[0].str() == "row" &&
-                  inNames[1].str() == "col");
-             if (!isTmemLayout)
-               throw std::invalid_argument(
-                   "Unsupported layout in to_linear_layout");
-
-             // Build Py _TensorMemoryLinearLayout(row_bases, col_bases, shape,
-             // repr)
-             py::object tmemCls =
-                 py::module::import(
-                     "triton.experimental.gluon.language.nvidia.blackwell")
-                     .attr("_TensorMemoryLinearLayout");
-             auto bases = linearLayout.getBases();
-             auto rowBases = bases[mlir::StringAttr::get(ctx, "row")];
-             auto colBases = bases[mlir::StringAttr::get(ctx, "col")];
-             auto outDims = linearLayout.getOutDims();
-             std::vector<int> shapeVec;
-             for (auto &od : outDims)
-               shapeVec.push_back(od.second);
-
-             py::object pyObj = tmemCls(py::cast(rowBases), py::cast(colBases),
-                                        py::cast(shapeVec));
-             return pyObj;
+             return ttg::LinearEncodingAttr::get(ctx, ll);
            })
       .def("get_dot_operand_layout",
            [](GluonOpBuilder &self, unsigned opIdx, Attribute parent,
@@ -436,138 +327,100 @@ void init_gluon_ir(py::module &&m) {
       .def("get_mma_layout",
            [](GluonOpBuilder &self, std::vector<unsigned> &version,
               std::vector<unsigned> &warpsPerCta,
-              std::vector<std::vector<int32_t>> &cgaBases,
+              std::vector<unsigned> &ctasPerCga,
+              std::vector<unsigned> &ctaSplitNum,
+              std::vector<unsigned> &ctaOrder,
               std::vector<unsigned> &instrShape) -> Attribute {
              auto ctx = self.getContext();
-             unsigned rank = warpsPerCta.size();
-             auto cgaLayout = buildCgaLayoutAttr(ctx, cgaBases, rank);
+             auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
+                 ctx, ctasPerCga, ctaSplitNum, ctaOrder);
              return self.getChecked<ttg::NvidiaMmaEncodingAttr>(
-                 ctx, version[0], version[1], warpsPerCta, cgaLayout,
+                 ctx, version[0], version[1], warpsPerCta, ctaLayout,
                  instrShape);
            })
       .def("get_amd_mfma_layout",
            [](GluonOpBuilder &self, unsigned version,
-              std::vector<unsigned> &warpsPerCta,
               std::vector<unsigned> &instrShape, bool transposed,
-              std::vector<std::vector<int32_t>> &cgaBases,
+              std::vector<unsigned> &warpsPerCta, mlir::Type elemType,
               std::vector<unsigned> &tilesPerWarp,
-              unsigned elementBitWidth) -> Attribute {
+              std::vector<unsigned> &ctasPerCga,
+              std::vector<unsigned> &ctaSplitNum,
+              std::vector<unsigned> &ctaOrder) -> Attribute {
              auto ctx = self.getContext();
-             unsigned rank = warpsPerCta.size();
-             auto cgaLayout = buildCgaLayoutAttr(ctx, cgaBases, rank);
+             auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
+                 ctx, ctasPerCga, ctaSplitNum, ctaOrder);
              return ttg::AMDMfmaEncodingAttr::get(
-                 ctx, version, warpsPerCta, instrShape, transposed, cgaLayout,
-                 tilesPerWarp, elementBitWidth);
-           })
-      .def("get_amd_wmma_layout",
-           [](GluonOpBuilder &self, unsigned version, bool transposed,
-              std::vector<std::vector<int32_t>> &warpBases,
-              std::vector<std::vector<int32_t>> &regBases,
-              std::vector<std::vector<int32_t>> &cgaBases,
-              std::vector<unsigned> &instrShape, unsigned rank) -> Attribute {
-             auto ctx = self.getContext();
-             auto kReg = mlir::StringAttr::get(ctx, "register");
-             auto kWarp = mlir::StringAttr::get(ctx, "warp");
-             auto ctaLayout =
-                 tt::LinearLayout({{kReg, regBases}, {kWarp, warpBases}},
-                                  tt::standardOutDimNames(ctx, rank));
-             auto cgaLayout = buildCgaLayoutAttr(ctx, cgaBases, rank);
-             return ttg::AMDWmmaEncodingAttr::get(
-                 ctx, version, ctaLayout, transposed, cgaLayout, instrShape);
+                 ctx, version, warpsPerCta, tilesPerWarp, instrShape[0],
+                 instrShape[1], transposed, ctaLayout, elemType);
            })
       .def("get_padded_shared_layout",
            [](GluonOpBuilder &self, std::vector<unsigned> &intervals,
-              std::vector<unsigned> &paddings,
-              std::vector<std::vector<int>> &offsetBases,
-              std::vector<std::vector<int>> &blockBases,
-              std::vector<int64_t> &shape) -> Attribute {
+              std::vector<unsigned> &paddings, std::vector<unsigned> &order,
+              std::vector<unsigned> &ctasPerCga,
+              std::vector<unsigned> &ctaSplitNum,
+              std::vector<unsigned> &ctaOrder) -> Attribute {
              auto ctx = self.getContext();
-             auto rank = shape.size();
-             auto kOffset = mlir::StringAttr::get(ctx, "offset");
-             auto kBlock = mlir::StringAttr::get(ctx, "block");
-             auto ll = tt::LinearLayout(
-                 {{kOffset, offsetBases}, {kBlock, blockBases}},
-                 tt::standardOutDimNames(ctx, rank));
+             auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
+                 ctx, ctasPerCga, ctaSplitNum, ctaOrder);
              return ttg::PaddedSharedEncodingAttr::get(ctx, intervals, paddings,
-                                                       std::move(ll));
-           })
-      .def("get_shared_linear_layout",
-           [](GluonOpBuilder &self, std::vector<std::vector<int>> &offsetBases,
-              std::vector<std::vector<int>> &blockBases,
-              unsigned alignment) -> Attribute {
-             auto ctx = self.getContext();
-             auto kOffset = mlir::StringAttr::get(ctx, "offset");
-             auto kBlock = mlir::StringAttr::get(ctx, "block");
-             auto outDims = tt::standardOutDimNames(ctx, offsetBases[0].size());
-             auto ll = tt::LinearLayout(
-                 {{kOffset, offsetBases}, {kBlock, blockBases}}, outDims);
-             return self.getChecked<ttg::SharedLinearEncodingAttr>(
-                 ctx, std::move(ll), alignment);
+                                                       order, ctaLayout);
            })
       .def("get_nvmma_shared_layout",
            [](GluonOpBuilder &self, unsigned swizzleByteWidth,
               unsigned elementBitwidth, bool transposed, bool fp4Padded,
-              std::vector<std::vector<int32_t>> &cgaBases,
-              unsigned rank) -> Attribute {
+              std::vector<unsigned> &ctasPerCga,
+              std::vector<unsigned> &ctaSplitNum,
+              std::vector<unsigned> &ctaOrder) -> Attribute {
              auto ctx = self.getContext();
-             auto cgaLayout = buildCgaLayoutAttr(ctx, cgaBases, rank);
+             auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
+                 ctx, ctasPerCga, ctaSplitNum, ctaOrder);
              return self.getChecked<ttg::NVMMASharedEncodingAttr>(
                  ctx, swizzleByteWidth, transposed, elementBitwidth, fp4Padded,
-                 cgaLayout);
+                 ctaLayout);
            })
       .def("get_auto_layout",
            [](GluonOpBuilder &self) -> Attribute {
              return self.getChecked<gluon::AutoEncodingAttr>(self.getContext());
            })
-      .def("get_coalesced_layout",
-           [](GluonOpBuilder &self) -> Attribute {
-             return self.getChecked<gluon::CoalescedEncodingAttr>(
-                 self.getContext());
-           })
       .def("get_swizzled_shared_layout",
            [](GluonOpBuilder &self, int vec, int perPhase, int maxPhase,
-              std::vector<unsigned> &order,
-              std::vector<std::vector<int32_t>> &cgaBases) -> Attribute {
+              std::vector<unsigned> &order, std::vector<unsigned> &ctasPerCga,
+              std::vector<unsigned> &ctaSplitNum,
+              std::vector<unsigned> &ctaOrder) -> Attribute {
              auto ctx = self.getContext();
-             unsigned rank = order.size();
-             auto cgaLayout = buildCgaLayoutAttr(ctx, cgaBases, rank);
+             auto ctaLayout = self.getChecked<ttg::CTALayoutAttr>(
+                 ctx, ctasPerCga, ctaSplitNum, ctaOrder);
              return self.getChecked<ttg::SwizzledSharedEncodingAttr>(
-                 ctx, vec, perPhase, maxPhase, order, cgaLayout);
+                 ctx, vec, perPhase, maxPhase, order, ctaLayout);
            })
       .def("get_tensor_memory_layout",
-           [](GluonOpBuilder &self, std::vector<unsigned> &block,
-              unsigned colStride, std::vector<unsigned> &ctaSplitNum,
-              bool twoCTAs) -> Attribute {
+           [](GluonOpBuilder &self, std::vector<unsigned> &block, bool unpacked,
+              std::vector<unsigned> &ctaSplitNum) -> Attribute {
              auto ctx = self.getContext();
-             check(block.size() == 2, "expected a 2D block");
-             check(ctaSplitNum.size() == 2, "expected 2D CTA dimensions");
+             assert(block.size() == 2);
+             assert(ctaSplitNum.size() == 2);
              return self.getChecked<ttng::TensorMemoryEncodingAttr>(
-                 ctx, block[0], block[1], colStride, ctaSplitNum[0],
-                 ctaSplitNum[1], twoCTAs);
+                 ctx, block[0], block[1], unpacked, ctaSplitNum[0],
+                 ctaSplitNum[1]);
            })
       .def("get_tensor_memory_scales_layout",
            [](GluonOpBuilder &self,
               std::vector<unsigned> &ctaSplitNum) -> Attribute {
              auto ctx = self.getContext();
-             check(ctaSplitNum.size() == 2, "expected 2D CTA dimensions");
+             assert(ctaSplitNum.size() == 2);
              return self.getChecked<ttng::TensorMemoryScalesEncodingAttr>(
                  ctx, ctaSplitNum[0], ctaSplitNum[1]);
-           })
-      .def("get_shape_from_tensor",
-           [](GluonOpBuilder &self, Value tensor) -> std::vector<int64_t> {
-             auto ty = dyn_cast<RankedTensorType>(tensor.getType());
-             return ty.getShape();
            })
       .def("get_gluon_layout_from_tensor",
            [](GluonOpBuilder &self, Value tensor) -> py::object {
              auto ty = dyn_cast<RankedTensorType>(tensor.getType());
-             check(ty.getEncoding(), "expected a tensor with an encoding");
+             assert(ty.getEncoding());
              return layoutToGluon(ty.getEncoding());
            })
       .def("get_gluon_layout_from_memdesc",
            [](GluonOpBuilder &self, Value memdesc) -> py::object {
              auto ty = dyn_cast<ttg::MemDescType>(memdesc.getType());
-             check(ty.getEncoding(), "expected a memdesc with an encoding");
+             assert(ty.getEncoding());
              return layoutToGluon(ty.getEncoding());
            })
       .def("get_tensor_descriptor_layout_type",
@@ -597,17 +450,6 @@ void init_gluon_ir(py::module &&m) {
                                                        *mask);
              }
            })
-      .def("create_cat",
-           [](GluonOpBuilder &self, Value &lhs, Value &rhs,
-              Type retType) -> Value {
-             return self.create<triton::CatOp>(retType, lhs, rhs);
-           })
-      .def("create_fp4_to_fp",
-           [](GluonOpBuilder &self, Value src, Type elemType,
-              int axis) -> Value {
-             return self.create<ttg::Fp4ToFpOp>(
-                 cast<TypedValue<RankedTensorType>>(src), elemType, axis);
-           })
       .def("create_async_copy_global_to_local",
            [](GluonOpBuilder &self, Value smem, Value pointer, Value mask,
               Value other, tt::CacheModifier cacheModifier,
@@ -615,13 +457,6 @@ void init_gluon_ir(py::module &&m) {
              self.create<ttg::AsyncCopyGlobalToLocalOp>(
                  pointer, smem, mask, other, cacheModifier, evictionPolicy,
                  isVolatile);
-           })
-      .def("create_async_copy_local_to_global",
-           [](GluonOpBuilder &self, Value smem, Value pointer, Value mask,
-              tt::CacheModifier cacheModifier,
-              tt::EvictionPolicy evictionPolicy) {
-             self.create<ttag::AsyncCopyLocalToGlobalOp>(
-                 smem, pointer, mask, cacheModifier, evictionPolicy);
            })
       .def("create_async_copy_mbarrier_arrive",
            [](GluonOpBuilder &self, Value mbarrier, bool incrementCount) {
@@ -657,32 +492,6 @@ void init_gluon_ir(py::module &&m) {
       .def("create_local_load",
            [](GluonOpBuilder &self, Type resultTy, Value memDesc) -> Value {
              return self.create<ttg::LocalLoadOp>(resultTy, memDesc);
-           })
-      .def("create_local_gather",
-           [](GluonOpBuilder &self, Type resultTy, Value memDesc, Value indices,
-              int32_t axis) -> Value {
-             auto ctx = self.getContext();
-             auto i32Ty = IntegerType::get(ctx, 32);
-             auto axisAttr = IntegerAttr::get(i32Ty, axis);
-             return self.create<ttg::LocalGatherOp>(resultTy, memDesc, indices,
-                                                    axisAttr);
-           })
-      .def("create_local_scatter",
-           [](GluonOpBuilder &self, Value memDesc, Value values, Value indices,
-              int32_t axis) {
-             auto ctx = self.getContext();
-             auto i32Ty = IntegerType::get(ctx, 32);
-             auto axisAttr = IntegerAttr::get(i32Ty, axis);
-             self.create<ttg::LocalScatterOp>(memDesc, values, indices,
-                                              axisAttr);
-           })
-      .def("get_shared_bank_conflicts",
-           [](GluonOpBuilder &self, Attribute regLayoutAttr,
-              Attribute sharedLayoutAttr, std::vector<int64_t> &shape,
-              int bitwidth) -> int {
-             auto regLayout = ttg::toLinearLayout(shape, regLayoutAttr);
-             auto smemLayout = ttg::toLinearLayout(shape, sharedLayoutAttr);
-             return ttg::bankConflictsMemDesc(regLayout, smemLayout, bitwidth);
            })
       .def("create_local_dealloc",
            [](GluonOpBuilder &self, Value memDesc) -> Operation * {
@@ -757,41 +566,10 @@ void init_gluon_ir(py::module &&m) {
            [](GluonOpBuilder &self, Value memDesc, Value value, Value pred) {
              self.create<ttng::TMEMStoreOp>(memDesc, value, pred);
            })
-      .def(
-          "create_tmem_load",
-          [](GluonOpBuilder &self, Type resultTy, Value memDesc,
-             std::optional<ttng::TMEMLoadReduceModifier> redOp, bool useAbs,
-             tt::PropagateNan propagateNan) -> py::object {
-            ttng::TMEMLoadReduceModifierAttr redOpAttr = nullptr;
-            BoolAttr absAttr = nullptr;
-            BoolAttr nanAttr = nullptr;
-
-            if (redOp) {
-              redOpAttr = ttng::TMEMLoadReduceModifierAttr::get(
-                  self.getContext(), redOp.value());
-              if (useAbs)
-                absAttr = self.getBuilder().getBoolAttr(true);
-              if (propagateNan != tt::PropagateNan::NONE)
-                nanAttr = self.getBuilder().getBoolAttr(true);
-            }
-
-            auto op = self.create<ttng::TMEMLoadOp>(
-                resultTy, /*token=*/Type(), memDesc, /*dep=*/Value(), redOpAttr,
-                absAttr, nanAttr);
-
-            if (redOp) {
-              Value result = op.getResult();
-              Value red = op.getRed();
-              auto redTy = cast<RankedTensorType>(red.getType());
-              py::object redLayout = layoutToGluon(redTy.getEncoding());
-              return py::make_tuple(result, red, redLayout);
-            }
-            Value result = op.getResult();
-            return py::cast(result);
-          },
-          py::arg("resultTy"), py::arg("memDesc"),
-          py::arg("redOp") = py::none(), py::arg("useAbs") = false,
-          py::arg("propagateNan") = tt::PropagateNan::NONE)
+      .def("create_tmem_load",
+           [](GluonOpBuilder &self, Type resultTy, Value memDesc) -> Value {
+             return self.create<ttng::TMEMLoadOp>(resultTy, memDesc);
+           })
       .def("create_tmem_copy",
            [](GluonOpBuilder &self, Value src, Value dst) {
              self.create<ttng::TMEMCopyOp>(src, dst, /*barrier=*/Value());
@@ -822,50 +600,27 @@ void init_gluon_ir(py::module &&m) {
            [](GluonOpBuilder &self, Value memDesc, int count, Value pred) {
              self.create<ttng::ArriveBarrierOp>(memDesc, count, pred);
            })
-      .def("create_fence_mbarrier_init_release_cluster",
-           [](GluonOpBuilder &self) {
-             self.create<ttng::FenceMBarrierInitReleaseClusterOp>();
-           })
-      .def("create_cluster_arrive",
-           [](GluonOpBuilder &self, bool relaxed) {
-             self.create<ttng::ClusterArriveOp>(relaxed);
-           })
-      .def("create_cluster_wait",
-           [](GluonOpBuilder &self) { self.create<ttng::ClusterWaitOp>(); })
       .def("create_tcgen05_mma",
            [](GluonOpBuilder &self, Value a, Value b, Value acc, Value useAcc,
               Value pred, std::vector<Value> &mbarriers,
-              std::vector<Value> &mbarrier_preds, bool two_ctas,
-              bool multicast) {
-             Value accDep;
-             auto tokType = self.getBuilder().getType<ttg::AsyncTokenType>();
-             self.create<ttng::TCGen5MMAOp>(tokType, a, b, acc, accDep, useAcc,
-                                            pred, two_ctas, multicast,
-                                            mbarriers, mbarrier_preds);
-           })
-      .def("create_tcgen05_mma_scaled",
-           [](GluonOpBuilder &self, Value a, Value b, Value acc, Value aScale,
-              Value bScale, tt::ScaleDotElemType aType,
-              tt::ScaleDotElemType bType, Value useAcc, Value pred,
-              std::vector<Value> &mbarriers,
               std::vector<Value> &mbarrier_preds) {
              Value accDep;
+             bool two_ctas = false;
              auto tokType = self.getBuilder().getType<ttg::AsyncTokenType>();
-             self.create<ttng::TCGen5MMAScaledOp>(
-                 tokType, a, b, acc, accDep, aScale, bScale, aType, bType,
-                 useAcc, pred, mbarriers, mbarrier_preds);
+             self.create<ttng::TCGen5MMAOp>(tokType, a, b, acc, accDep, useAcc,
+                                            pred, two_ctas, mbarriers,
+                                            mbarrier_preds);
            })
       .def("create_tcgen05_commit",
-           [](GluonOpBuilder &self, Value &barrier, Value &pred,
-              std::vector<Value> &descs) {
-             self.create<ttng::TCGen5CommitOp>(barrier, pred, descs);
+           [](GluonOpBuilder &self, Value &barrier) {
+             self.create<ttng::TCGen5CommitOp>(barrier);
            })
 
       .def("create_async_tma_copy_global_to_local",
            [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &coord,
-              Value barrier, Value result, Value pred, bool multicast) {
+              Value barrier, Value result, Value pred) {
              self.create<ttng::AsyncTMACopyGlobalToLocalOp>(
-                 descPtr, coord, barrier, result, pred, multicast);
+                 descPtr, coord, barrier, result, pred);
            })
       .def("create_async_tma_copy_local_to_global",
            [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &coord,
@@ -898,11 +653,6 @@ void init_gluon_ir(py::module &&m) {
            [](GluonOpBuilder &self, bool bCluster) -> OpState {
              return self.create<ttng::FenceAsyncSharedOp>(bCluster);
            })
-      .def("create_cluster_sync",
-           [](GluonOpBuilder &self) {
-             self.create<ttng::ClusterArriveOp>(/*relaxed=*/false);
-             self.create<ttng::ClusterWaitOp>();
-           })
 
       .def("create_broadcast",
            [](TritonOpBuilder &self, Value &arg, Type retTy) -> Value {
@@ -917,16 +667,15 @@ void init_gluon_ir(py::module &&m) {
              return self.create<ttg::WarpYieldOp>(values);
            })
       .def("create_warp_specialize_partitions",
-           [](GluonOpBuilder &self, std::vector<Value> &explicitCaptures,
-              int numPartitions) -> Operation * {
-             return self.create<ttg::WarpSpecializePartitionsOp>(
-                 explicitCaptures, numPartitions);
+           [](GluonOpBuilder &self, int numPartitions) -> Operation * {
+             return self.create<ttg::WarpSpecializePartitionsOp>(numPartitions);
            })
       .def("create_warp_specialize",
            [](GluonOpBuilder &self, std::vector<Type> &resultTypes,
+              std::vector<Value> &explicitCaptures,
               std::vector<int> &partitionNumWarps) {
-             return self.create<ttg::WarpSpecializeOp>(resultTypes,
-                                                       partitionNumWarps);
+             return self.create<ttg::WarpSpecializeOp>(
+                 resultTypes, explicitCaptures, partitionNumWarps);
            })
       .def("create_buffer_load",
            [](GluonOpBuilder &self, Type resultType, Value ptr, Value offsets,
@@ -941,237 +690,13 @@ void init_gluon_ir(py::module &&m) {
              self.create<ttag::BufferStoreOp>(storedValue, ptr, offsets,
                                               Value() /*stride*/, cache, mask);
            })
-      .def("create_buffer_atomic_rmw",
-           [](GluonOpBuilder &self, tt::RMWOp op, Value ptr, Value offsets,
-              Value value, tt::MemSemantic sem, tt::MemSyncScope scope,
-              Value mask) -> Value {
-             return self.create<ttag::BufferAtomicRMWOp>(
-                 value.getType(), op, ptr, offsets, value, Value() /*stride*/,
-                 sem, scope, mask);
-           })
       .def("create_buffer_load_to_local",
            [](GluonOpBuilder &self, Value dest, Value ptr, Value offsets,
               Value mask, Value other, Value stride,
               tt::CacheModifier cacheModifier) {
              self.create<ttag::BufferLoadToLocalOp>(
                  dest, ptr, offsets, mask, other, stride, cacheModifier);
-           })
-      .def("create_make_tensor_descriptor",
-           [](TritonOpBuilder &self, Type resultTy, Value &base,
-              std::vector<Value> &shape, std::vector<Value> &strides,
-              tt::PaddingOption paddingOption) -> Value {
-             return self.create<tt::MakeTensorDescOp>(resultTy, base, shape,
-                                                      strides, paddingOption);
-           })
-      .def("create_async_tdm_copy_global_to_local",
-           [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &indices,
-              Value result, Value pred, Value barrier) {
-             self.create<ttag::AsyncTDMCopyGlobalToLocalOp>(
-                 descPtr, indices, result, pred, barrier);
-           })
-      .def("create_async_tdm_copy_local_to_global",
-           [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &indices,
-              Value src, Value barrier) {
-             self.create<ttag::AsyncTDMCopyLocalToGlobalOp>(descPtr, indices,
-                                                            src, barrier);
-           })
-      .def("create_async_tdm_scatter",
-           [](GluonOpBuilder &self, Value descPtr, Value dstRowIndices,
-              Value dstColOffset, Value src, Value barrier) {
-             self.create<ttag::AsyncTDMScatterOp>(descPtr, dstRowIndices,
-                                                  dstColOffset, src, barrier);
-           })
-      .def("create_tdm_prefetch",
-           [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &indices,
-              Value pred, bool speculative, bool returnOffsets) -> Value {
-             auto op = self.create<ttag::TDMPrefetchOp>(
-                 descPtr, indices, pred, speculative,
-                 returnOffsets ? UnitAttr::get(self.getContext()) : nullptr);
-             return returnOffsets ? op->getResult(0) : nullptr;
-           })
-      .def("create_async_tdm_wait",
-           [](GluonOpBuilder &self, int num) {
-             ValueRange tokens;
-             self.create<ttag::AsyncTDMWait>(tokens, num);
-           })
-      .def("create_async_copy_lds_barrier_arrive",
-           [](GluonOpBuilder &self, Value mbarrier) {
-             self.create<ttag::AsyncCopyMbarrierArriveOp>(mbarrier);
-           })
-      .def("create_lds_barrier_init",
-           [](GluonOpBuilder &self, Value memDesc, int count) {
-             self.create<ttag::InitBarrierOp>(memDesc, count);
-           })
-      .def("create_lds_barrier_wait",
-           [](GluonOpBuilder &self, Value memDesc, Value phase) {
-             self.create<ttag::WaitBarrierOp>(memDesc, phase);
-           })
-      .def("create_lds_barrier_arrive",
-           [](GluonOpBuilder &self, Value memDesc, int count) -> Value {
-             return self.create<ttag::ArriveBarrierOp>(memDesc, count);
-           })
-      .def("create_amd_cluster_arrive",
-           [](GluonOpBuilder &self) {
-             self.create<ttag::ClusterBarrierArriveOp>();
-           })
-      .def("create_amd_cluster_wait",
-           [](GluonOpBuilder &self) {
-             self.create<ttag::ClusterBarrierWaitOp>();
-           })
-      .def("create_warp_pipeline_border",
-           [](GluonOpBuilder &self, const std::string &marker, int priority) {
-             auto border = self.create<ROCDL::SchedBarrier>(0);
-             auto ctx = self.getContext();
-             border->setAttr("triton.warp_pipeline.border",
-                             StringAttr::get(ctx, marker));
-             if (priority > -1) {
-               auto i32Ty = IntegerType::get(ctx, 32);
-               border->setAttr("triton.warp_pipeline.priority",
-                               IntegerAttr::get(i32Ty, priority));
-             }
            });
-
-  m.def(
-      "compute_tmem_reg_layout",
-      [](py::object elementTyObj, std::vector<int64_t> shape,
-         py::object layoutObj, unsigned numWarps, const std::string &atomName,
-         std::vector<std::vector<int32_t>> cgaBases) -> py::object {
-        DialectRegistry registry;
-        registry.insert<triton::TritonDialect, ttg::TritonGPUDialect,
-                        ttng::TritonNvidiaGPUDialect, gluon::GluonDialect>();
-        MLIRContext context(MLIRContext::Threading::DISABLED);
-        context.appendDialectRegistry(registry);
-        context.loadAllAvailableDialects();
-
-        GluonOpBuilder builder(&context);
-        auto builderObj =
-            py::cast(&builder, py::return_value_policy::reference);
-
-        auto elementType = elementTyObj.attr("to_ir")(builderObj).cast<Type>();
-        auto layoutAttr =
-            layoutObj.attr("_to_ir")(builderObj).cast<Attribute>();
-        auto allocShape = shape;
-
-        auto ctx = builder.getContext();
-        unsigned rank = shape.size();
-        auto memDescTy = builder.getChecked<ttg::MemDescType>(
-            shape, elementType, layoutAttr,
-            ttng::TensorMemorySpaceAttr::get(ctx),
-            /*mutableMemory=*/true, allocShape);
-        auto ctaLayoutAttr = buildCgaLayoutAttr(ctx, cgaBases, rank);
-
-        auto maybeAtom =
-            llvm::StringSwitch<std::optional<ttng::TMemAccessAtom>>(atomName)
-                .Case("32x32b", ttng::TMemAccessAtom::I32x32b)
-                .Case("16x64b", ttng::TMemAccessAtom::I16x64b)
-                .Case("16x128b", ttng::TMemAccessAtom::I16x128b)
-                .Case("16x256b", ttng::TMemAccessAtom::I16x256b)
-                .Case("16x32bx2", ttng::TMemAccessAtom::I16x32bx2)
-                .Default(std::nullopt);
-        if (!maybeAtom)
-          throw std::invalid_argument("unknown TMEM access atom: " + atomName);
-        auto atom = *maybeAtom;
-        if (atom == ttng::TMemAccessAtom::I16x32bx2)
-          throw std::invalid_argument(
-              "Atom 16x32bx2 is inferred implicitly and cannot be requested "
-              "explicitly");
-        if (numWarps < 4 || !llvm::isPowerOf2_32(numWarps))
-          throw std::invalid_argument(
-              "numWarps must be a power of two and >= 4");
-
-        auto layout = ttng::getDistributedLayoutForTmemLdSt(
-            memDescTy, atom, numWarps, ctaLayoutAttr);
-        if (!layout)
-          return py::none();
-
-        auto attr = ttg::LinearEncodingAttr::get(ctx, std::move(*layout));
-        return layoutToGluon(attr);
-      });
-
-  m.def(
-      "make_cga_layout",
-      [](std::vector<unsigned> ctasPerCga, std::vector<unsigned> ctaSplitNum,
-         std::vector<unsigned> ctaOrder) -> std::vector<std::vector<int32_t>> {
-        DialectRegistry registry;
-        registry.insert<triton::TritonDialect, ttg::TritonGPUDialect>();
-        MLIRContext ctx(MLIRContext::Threading::DISABLED);
-        ctx.appendDialectRegistry(registry);
-        ctx.loadAllAvailableDialects();
-        auto attr = ttg::CGAEncodingAttr::fromSplitParams(
-            &ctx, ctasPerCga, ctaSplitNum, ctaOrder);
-        return getCgaLayoutBases(attr);
-      });
-
-  m.def("get_amd_mfma_scale_layout",
-        [](unsigned opIdx, std::vector<int64_t> &shape, unsigned mfmaMDim,
-           std::vector<unsigned> &tilesPerWarp,
-           std::vector<unsigned> &warpsPerCTA) -> py::object {
-          DialectRegistry registry;
-          registry.insert<triton::TritonDialect, ttg::TritonGPUDialect,
-                          ttng::TritonNvidiaGPUDialect, gluon::GluonDialect>();
-          MLIRContext ctx(MLIRContext::Threading::DISABLED);
-          ctx.appendDialectRegistry(registry);
-          ctx.loadAllAvailableDialects();
-
-          auto ll = ttg::chooseScaledMfmaScaleLayout(
-              &ctx, opIdx, shape, mfmaMDim, tilesPerWarp, warpsPerCTA);
-          auto attr = ttg::LinearEncodingAttr::get(&ctx, std::move(ll));
-          return layoutToGluon(attr);
-        });
-
-  m.def("get_amd_wmma_scale_layout",
-        [](unsigned opIdx, std::vector<int64_t> &shape, unsigned wmmaMDim,
-           std::vector<std::vector<int32_t>> &regBases,
-           std::vector<std::vector<int32_t>> &warpBases) -> py::object {
-          DialectRegistry registry;
-          registry.insert<triton::TritonDialect, ttg::TritonGPUDialect,
-                          ttng::TritonNvidiaGPUDialect, gluon::GluonDialect>();
-          MLIRContext ctx(MLIRContext::Threading::DISABLED);
-          ctx.appendDialectRegistry(registry);
-          ctx.loadAllAvailableDialects();
-
-          auto rank = shape.size();
-          auto kReg = mlir::StringAttr::get(&ctx, "register");
-          auto kWarp = mlir::StringAttr::get(&ctx, "warp");
-          auto ctaLayout =
-              tt::LinearLayout({{kReg, regBases}, {kWarp, warpBases}},
-                               tt::standardOutDimNames(&ctx, rank));
-          auto ll = ttg::chooseScaledWmmaScaleLayout(&ctx, opIdx, shape,
-                                                     wmmaMDim, ctaLayout);
-          auto attr = ttg::LinearEncodingAttr::get(&ctx, ll);
-          return layoutToGluon(attr);
-        });
-
-  m.def("get_layout_view",
-        [](py::object layout, std::vector<int64_t> shape,
-           bool useHwView) -> std::string {
-          DialectRegistry registry;
-          registry.insert<triton::TritonDialect, ttg::TritonGPUDialect,
-                          ttng::TritonNvidiaGPUDialect, gluon::GluonDialect>();
-          MLIRContext ctx(MLIRContext::Threading::DISABLED);
-          ctx.appendDialectRegistry(registry);
-          ctx.loadAllAvailableDialects();
-
-          GluonOpBuilder builder(&ctx);
-          auto builderObj =
-              py::cast(&builder, py::return_value_policy::reference);
-          Attribute attr = layout.attr("_to_ir")(builderObj).cast<Attribute>();
-
-          if (isa<gluon::AutoEncodingAttr>(attr))
-            throw py::value_error("AutoLayout cannot be visualized");
-          if (isa<gluon::CoalescedEncodingAttr>(attr))
-            throw py::value_error("CoalescedLayout cannot be visualized");
-          if (isa<ttg::PaddedSharedEncodingAttr>(attr))
-            throw py::value_error("PaddedSharedLayout cannot be visualized: "
-                                  "toLinearLayout not implemented");
-
-          auto ll = ttg::toLinearLayout(shape, attr);
-          if (isa<ttg::DistributedEncodingTrait>(attr)) {
-            return ttg::getDistributedLayoutStr(ll, useHwView);
-          } else {
-            return ttg::getSharedLayoutStr(ll, useHwView);
-          }
-        });
 
   py::class_<ttg::WarpSpecializeOp, OpState>(m, "WarpSpecializeOp",
                                              py::module_local())

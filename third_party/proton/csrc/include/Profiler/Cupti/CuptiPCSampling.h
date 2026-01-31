@@ -5,7 +5,6 @@
 #include "Driver/GPU/CudaApi.h"
 #include "Driver/GPU/CuptiApi.h"
 #include "Utility/Map.h"
-#include "Utility/Set.h"
 #include "Utility/Singleton.h"
 #include <atomic>
 #include <mutex>
@@ -109,7 +108,7 @@ public:
 
   void start(CUcontext context);
 
-  void stop(CUcontext context, const DataToEntryMap &dataToEntry);
+  void stop(CUcontext context, uint64_t externId, bool isAPI);
 
   void finalize(CUcontext context);
 
@@ -122,8 +121,8 @@ private:
 
   CubinData *getCubinData(uint64_t cubinCrc);
 
-  void processPCSamplingData(ConfigureData *configureData,
-                             const DataToEntryMap &dataToEntry);
+  void processPCSamplingData(ConfigureData *configureData, uint64_t externId,
+                             bool isAPI);
 
   ThreadSafeMap<uint32_t, ConfigureData> contextIdToConfigureData;
   // In case the same cubin is loaded multiple times, we need to keep track of

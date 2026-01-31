@@ -1,20 +1,26 @@
 #include "Profiler/Instrumentation/InstrumentationProfiler.h"
 #include "TraceDataIO/CircularLayoutParser.h"
 
-#include "Runtime/CudaRuntime.h"
-#include "Runtime/HipRuntime.h"
+#include "Driver/GPU/CudaApi.h"
+#include "Profiler/Instrumentation/CudaRuntime.h"
+#include "Profiler/Instrumentation/HipRuntime.h"
 #include "Utility/Numeric.h"
 #include "Utility/String.h"
 #include <algorithm>
-#include <cstdint>
+#include <limits>
 #include <map>
 #include <numeric>
+#include <queue>
+#include <set>
 #include <stdexcept>
 
 namespace proton {
 
 constexpr size_t DEFAULT_HOST_BUFFER_SIZE = 64 * 1024 * 1024;           // 64MB
 constexpr size_t MAX_HOST_BUFFER_SIZE = 4LL * 1024LL * 1024LL * 1024LL; // 4GB
+
+thread_local std::map<Data *, size_t> InstrumentationProfiler::dataScopeIdMap =
+    std::map<Data *, size_t>(); // Initialize the static member variable
 
 InstrumentationProfiler::~InstrumentationProfiler() {}
 
@@ -34,40 +40,32 @@ void InstrumentationProfiler::doStop() {
     runtime->freeHostBuffer(hostBuffer);
     hostBuffer = nullptr;
   }
-  for (auto &[device, deviceStream] : deviceStreams) {
-    runtime->destroyStream(deviceStream);
-  }
-  deviceStreams.clear();
-  // Reset mode options
-  modeOptions.clear();
-  // Note that we don't clear function metadata and names here, as they may be
-  // reused when the profiler is started again.
 }
 
-void InstrumentationProfiler::doSetMode(
-    const std::vector<std::string> &modeAndOptions) {
-  if (modeAndOptions.empty()) {
+InstrumentationProfiler *
+InstrumentationProfiler::setMode(const std::vector<std::string> &mode) {
+  if (mode.empty()) {
     throw std::runtime_error("Mode cannot be empty");
   }
-  if (proton::toLower(modeAndOptions[0]) ==
-      proton::toLower(DeviceTraits<DeviceType::CUDA>::name)) {
-    runtime = &CudaRuntime::instance();
-  } else if (proton::toLower(modeAndOptions[0]) ==
-             proton::toLower(DeviceTraits<DeviceType::HIP>::name)) {
-    runtime = &HipRuntime::instance();
+  if (toLower(mode[0]) == toLower(DeviceTraits<DeviceType::CUDA>::name)) {
+    runtime = std::make_unique<CudaRuntime>();
+  } else if (toLower(mode[0]) == toLower(DeviceTraits<DeviceType::HIP>::name)) {
+    runtime = std::make_unique<HipRuntime>();
   } else {
-    throw std::runtime_error("Unknown device type: " + modeAndOptions[0]);
+    throw std::runtime_error("Unknown device type: " + mode[0]);
   }
-  for (size_t i = 1; i < modeAndOptions.size(); ++i) {
-    auto delimiterPos = modeAndOptions[i].find('=');
+  for (size_t i = 1; i < mode.size(); ++i) {
+    auto delimiterPos = mode[i].find('=');
     if (delimiterPos != std::string::npos) {
-      std::string key = modeAndOptions[i].substr(0, delimiterPos);
-      std::string value = modeAndOptions[i].substr(delimiterPos + 1);
+      std::string key = mode[i].substr(0, delimiterPos);
+      std::string value = mode[i].substr(delimiterPos + 1);
       modeOptions[key] = value;
     } else {
-      modeOptions[modeAndOptions[i]] = "";
+      modeOptions[mode[i]] = "";
     }
   }
+
+  return this;
 }
 namespace {
 
@@ -184,8 +182,8 @@ void InstrumentationProfiler::exitInstrumentedOp(uint64_t streamId,
   if (!buffer || !hostBuffer)
     return;
 
-  void *device = runtime->getDevice();
-  void *&priorityStream = deviceStreams[device];
+  uint64_t device = runtime->getDevice();
+  void *&priorityStream = deviceStreams[reinterpret_cast<void *>(device)];
   if (!priorityStream) {
     priorityStream = runtime->getPriorityStream();
   }
@@ -200,8 +198,15 @@ void InstrumentationProfiler::exitInstrumentedOp(uint64_t streamId,
     runtime->allocateHostBuffer(&hostBuffer, newSize);
   }
 
+  auto dataSet = getDataSet();
   const auto &functionName = functionNames[functionId];
-  enterOp(Scope(functionName));
+  if (dataScopeIdMap.empty()) {
+    for (auto &data : dataSet) {
+      auto scopeId = Scope::getNewScopeId();
+      data->addOp(scopeId, functionName);
+      dataScopeIdMap[data] = scopeId;
+    }
+  }
 
   auto config = getParserConfig(functionId, size);
   auto circularLayoutConfig =
@@ -218,6 +223,7 @@ void InstrumentationProfiler::exitInstrumentedOp(uint64_t streamId,
         optimizations.end())
       timeShiftCost = getTimeShiftCost(*circularLayoutConfig);
   }
+
   auto &scopeIdContexts = functionScopeIdContexts[functionId];
 
   runtime->synchronizeStream(reinterpret_cast<void *>(streamId));
@@ -235,40 +241,24 @@ void InstrumentationProfiler::exitInstrumentedOp(uint64_t streamId,
               auto normalizedDuration = static_cast<double>(duration) /
                                         (circularLayoutConfig->totalUnits *
                                          circularLayoutConfig->numBlocks);
-              for (auto [data, entry] : dataToEntryMap) {
-                auto kernelId = entry.id;
-                entry = data->addOp(entry.phase, kernelId, contexts);
-                entry.upsertMetric(std::make_unique<CycleMetric>(
-                    event.first->cycle, event.second->cycle, duration,
-                    normalizedDuration, kernelId, functionName,
-                    blockTrace.blockId, blockTrace.procId, trace.uid,
-                    static_cast<uint64_t>(reinterpret_cast<uintptr_t>(device)),
-                    static_cast<uint64_t>(runtime->getDeviceType()),
-                    timeShiftCost, blockTrace.initTime, blockTrace.preFinalTime,
-                    blockTrace.postFinalTime));
+              for (auto *data : dataSet) {
+                auto kernelId = dataScopeIdMap[data];
+                auto scopeId = data->addOp(kernelId, contexts);
+                data->addMetric(
+                    scopeId,
+                    std::make_shared<CycleMetric>(
+                        event.first->cycle, event.second->cycle, duration,
+                        normalizedDuration, kernelId, functionName,
+                        blockTrace.blockId, blockTrace.procId, trace.uid,
+                        device, static_cast<uint64_t>(runtime->getDeviceType()),
+                        timeShiftCost));
               }
             }
           }
         }
       });
 
-  exitOp(Scope(functionName));
-}
-
-void InstrumentationProfiler::doAddMetrics(
-    size_t scopeId, const std::map<std::string, MetricValueType> &scalarMetrics,
-    const std::map<std::string, TensorMetric> &tensorMetrics) {
-  if (dataToEntryMap.empty()) {
-    for (auto *data : dataSet) {
-      data->addMetrics(scopeId, scalarMetrics);
-    }
-  } else {
-    for (auto [data, entry] : dataToEntryMap) {
-      data->addMetrics(entry.phase, entry.id, scalarMetrics);
-    }
-  }
-  // TODO(Keren): handle tensor metrics by making metricBuffer a member of the
-  // parent Profiler
+  dataScopeIdMap.clear();
 }
 
 } // namespace proton

@@ -97,15 +97,6 @@ def sqrt(arg0, _semantic=None):
 
 
 @core.extern
-def rint(arg0, _semantic=None):
-    return core.extern_elementwise(
-        "", "", [arg0], {
-            (core.dtype("fp32"), ): ("__triton_hip_rint", core.dtype("fp32")),
-            (core.dtype("fp64"), ): ("__triton_hip_rint", core.dtype("fp64")),
-        }, is_pure=True, _semantic=_semantic)
-
-
-@core.extern
 def llrint(arg0, _semantic=None):
     return core.extern_elementwise(
         "", "", [arg0], {
@@ -498,17 +489,3 @@ def round(arg0, _semantic=None):
             (core.dtype("fp32"), ): ("__ocml_round_f32", core.dtype("fp32")),
             (core.dtype("fp64"), ): ("__ocml_round_f64", core.dtype("fp64")),
         }, is_pure=True, _semantic=_semantic)
-
-
-@core.extern
-def finitef(arg0, _semantic=None):
-    return core.extern_elementwise("", "", [arg0], {
-        (core.dtype("fp32"), ): ("__ocml_isfinite_f32", core.dtype("int32")),
-    }, is_pure=True, _semantic=_semantic).to(core.int1, _semantic=_semantic)
-
-
-@core.extern
-def isfinited(arg0, _semantic=None):
-    return core.extern_elementwise("", "", [arg0], {
-        (core.dtype("fp64"), ): ("__ocml_isfinite_f64", core.dtype("int32")),
-    }, is_pure=True, _semantic=_semantic).to(core.int1, _semantic=_semantic)

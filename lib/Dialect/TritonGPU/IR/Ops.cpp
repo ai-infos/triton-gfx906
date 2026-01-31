@@ -38,7 +38,6 @@ static void printOffsets(mlir::OpAsmPrinter &p, mlir::Operation *op,
 
 #define GET_OP_CLASSES
 #include "triton/Dialect/TritonGPU/IR/Ops.cpp.inc"
-#include "triton/Dialect/TritonGPU/IR/OpsEnums.cpp.inc"
 
 namespace mlir::triton::gpu {
 
@@ -180,7 +179,7 @@ struct CanonicalizeConvertFromHistogram
     if (mask) {
       auto sharedType = getI1SameShape(src.getType());
       rewriter.setInsertionPoint(op);
-      mask = ConvertLayoutOp::create(rewriter, op.getLoc(), sharedType, mask);
+      mask = rewriter.create<ConvertLayoutOp>(op.getLoc(), sharedType, mask);
     }
 
     rewriter.replaceOpWithNewOp<triton::HistogramOp>(
@@ -403,77 +402,38 @@ void ConvertLayoutOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
 LogicalResult Fp4ToFpOp::verify() {
   auto srcTy = cast<RankedTensorType>(getSrc().getType());
   auto resTy = cast<RankedTensorType>(getResult().getType());
+  auto rank = srcTy.getRank();
+
+  if (rank != resTy.getRank())
+    return emitError() << "source rank " << rank << " != result rank "
+                       << resTy.getRank();
+
+  auto srcShape = srcTy.getShape();
+  auto resShape = resTy.getShape();
   auto axis = getAxis();
+
+  if (!(0 <= axis && axis < rank))
+    return emitError() << "axis " << axis << " out of range for rank " << rank;
 
   auto elemType = resTy.getElementType();
   if (!(elemType.isBF16() || elemType.isF16()))
     return emitError() << "only bf16 or f16 is supported for now, got "
                        << elemType;
 
-  return verifyFp4ToFp(*this, srcTy, resTy, axis);
-}
-
-LogicalResult Fp4ToFpOp::verifyFp4ToFp(mlir::Operation *op,
-                                       RankedTensorType srcTy,
-                                       RankedTensorType resTy, unsigned axis) {
-  auto rank = srcTy.getRank();
-
-  if (rank != resTy.getRank())
-    return op->emitError() << "source rank " << rank << " != result rank "
-                           << resTy.getRank();
-
-  auto srcShape = srcTy.getShape();
-  auto resShape = resTy.getShape();
-
-  if (!(0 <= axis && axis < rank))
-    return op->emitError() << "axis " << axis << " out of range for rank "
-                           << rank;
-
   for (int i = 0; i < rank; ++i) {
     if (i == axis) {
       if (resShape[i] != srcShape[i] * 2)
-        return op->emitError()
-               << "axis " << axis
-               << " dimension must be 2x source dimension (src=" << srcShape[i]
-               << ", dst=" << resShape[i] << ")";
+        return emitError() << "axis " << axis
+                           << " dimension must be 2x source dimension (src="
+                           << srcShape[i] << ", dst=" << resShape[i] << ")";
     } else {
       if (resShape[i] != srcShape[i])
-        return op->emitError()
-               << "dimension " << i << " mismatch (src=" << srcShape[i]
-               << ", dst=" << resShape[i] << ", axis=" << axis << ")";
+        return emitError() << "dimension " << i
+                           << " mismatch (src=" << srcShape[i]
+                           << ", dst=" << resShape[i] << ", axis=" << axis
+                           << ")";
     }
   }
-  if (bool(resTy.getEncoding()) != bool(srcTy.getEncoding()))
-    return op->emitError()
-           << "source and result must both have an encoding, or neither";
-  if (!resTy.getEncoding()) {
-    return success();
-  }
-  auto srcLl = toLinearLayout(srcTy);
-  auto resLl = toLinearLayout(resTy);
-  auto *ctx = srcTy.getContext();
-  auto regDim = StringAttr::get(ctx, "register");
-  auto outDims = standardOutDimNames(ctx, rank);
-
-  // We use backward inference here as it is striclty more general
-  Attribute inferSrc;
-  auto dialect =
-      resTy.getEncoding()
-          .getDialect()
-          .getRegisteredInterface<triton::DialectInferLayoutInterface>();
-  assert(dialect);
-  if (failed(dialect->inferFp4ToFpOpEncoding(
-          resTy.getShape(), axis, resTy.getEncoding(), inferSrc,
-          /*fwdInference*/ false, std::nullopt))) {
-    return op->emitError() << "failed to infer encoding";
-  }
-  if (!areLayoutsEquivalent(srcTy.getShape(),
-                            cast<LayoutEncodingTrait>(inferSrc),
-                            cast<LayoutEncodingTrait>(srcTy.getEncoding())))
-    return op->emitError()
-           << "Src and Dst encodings are not compatible:\n"
-           << toLinearLayout(srcTy.getShape(), inferSrc).toString() << "\n"
-           << srcLl.toString();
   return success();
 }
 
@@ -571,58 +531,56 @@ LogicalResult MemDescReshapeOp::verify() {
   if (failed(inferReturnTypes(getContext(), getLoc(), srcType,
                               dstType.getShape(), expectedTy)))
     return failure();
-  return OpTrait::impl::verifyEquivalentType(expectedTy, dstType);
+  // Check that the alloc shape separately to give a cleaner error, given that
+  // it's the most likely source of the error.
+  if (expectedTy.getAllocShape() != dstType.getAllocShape()) {
+    return emitError(
+        "The result alloc shape does not match the expected alloc shape.");
+  }
+  if (expectedTy != dstType) {
+    return emitError("source and destination layout are incompatible.");
+  }
+  return success();
 }
 
 static LogicalResult inferMemDescReshapeOpEncoding(ArrayRef<int64_t> srcShape,
                                                    Attribute srcEnc,
                                                    ArrayRef<int64_t> dstShape,
                                                    Attribute &dstEnc) {
-  auto *ctx = srcEnc.getContext();
-  // TODO Delete this once SharedLinearEncodingAttr is more widely supported.
   if (auto mmaEncoding = dyn_cast<NVMMASharedEncodingAttr>(srcEnc)) {
-    if (getNumCTAs(mmaEncoding) == 1) {
-      int innerDimDst =
-          mmaEncoding.getTransposed() ? dstShape.front() : dstShape.back();
-      int innerDimSrc =
-          mmaEncoding.getTransposed() ? srcShape.front() : srcShape.back();
-      // We can keep an NVMMAShared encoding only if the innermost dimension is
-      // preserved. Otherwise fall back to the generic shared-linear encoding
-      // logic below.
-      if (innerDimDst == innerDimSrc) {
-        auto CGALayout = CGAEncodingAttr::get1CTALayout(ctx, dstShape.size());
-        auto candidateEncoding = NVMMASharedEncodingAttr::get(
-            ctx, mmaEncoding.getSwizzlingByteWidth(),
-            mmaEncoding.getTransposed(), mmaEncoding.getElementBitWidth(),
-            mmaEncoding.getFp4Padded(), CGALayout);
-        auto srcLL = toLinearLayout(srcShape, srcEnc);
-        auto dstLL = toLinearLayout(dstShape, candidateEncoding);
-        if (reshapeLayout(ctx, srcLL, dstShape) == dstLL) {
-          dstEnc = candidateEncoding;
-          return success();
-        }
-      }
+    // TODO: supporting reshape of CTA layouts is non-trivial.
+    if (getNumCTAs(mmaEncoding) > 1)
+      return failure();
+    int innerDimDst =
+        mmaEncoding.getTransposed() ? dstShape.front() : dstShape.back();
+    int innerDimSrc =
+        mmaEncoding.getTransposed() ? srcShape.front() : srcShape.back();
+    // For now disallow reshape of the inner dimension.
+    if (innerDimDst != innerDimSrc)
+      return failure();
+    auto *ctx = srcEnc.getContext();
+
+    // CTALayout can be all 1's because we bailed on multi-CTA layouts above.
+    auto CTALayout = CTALayoutAttr::get(
+        ctx,
+        /*CTAsPerCGA=*/SmallVector<unsigned>(dstShape.size(), 1),
+        /*CTASplitNum=*/SmallVector<unsigned>(dstShape.size(), 1),
+        /*CTAOrder=*/llvm::to_vector(llvm::seq<unsigned>(dstShape.size())));
+    dstEnc = NVMMASharedEncodingAttr::get(
+        ctx, mmaEncoding.getSwizzlingByteWidth(), mmaEncoding.getTransposed(),
+        mmaEncoding.getElementBitWidth(), mmaEncoding.getFp4Padded(),
+        CTALayout);
+    // Big guns, check linear layouts are equivalent
+    // We disallow reshaping memdesc_subslice in the verifier
+    // so allocShape == shape
+    auto srcLL = toLinearLayout(srcShape, srcEnc);
+    auto dstLL = toLinearLayout(dstShape, dstEnc);
+    if (reshapeLayout(ctx, srcLL, dstShape) != dstLL) {
+      return failure();
     }
-  } else if (auto padded = dyn_cast<PaddedSharedEncodingAttr>(srcEnc)) {
-    LinearLayout ll = padded.getLinearComponent();
-    LinearLayout dst = reshapeLayout(ctx, ll, dstShape);
-    SmallVector<std::pair<unsigned, unsigned>> intervalPads;
-    auto intervals = padded.getIntervals();
-    auto paddings = padded.getPaddings();
-    for (auto [interval, padding] : llvm::zip(intervals, paddings)) {
-      intervalPads.emplace_back(interval, padding);
-    }
-    dstEnc = PaddedSharedEncodingAttr::get(ctx, intervalPads, std::move(dst));
     return success();
   }
-
-  // Generic LL case
-  auto sharedEnc = cast<SharedEncodingTrait>(srcEnc);
-  auto srcLL = toLinearLayout(srcShape, srcEnc);
-  auto dstLL = reshapeLayout(ctx, srcLL, dstShape);
-  dstEnc = SharedLinearEncodingAttr::get(ctx, std::move(dstLL),
-                                         sharedEnc.getAlignment());
-  return success();
+  return failure();
 }
 
 LogicalResult MemDescReshapeOp::inferReturnTypes(
@@ -773,101 +731,6 @@ LogicalResult LocalLoadOp::verify() {
   return verifyMemoryOpTypes(*this, getSrc().getType(), getType());
 }
 
-// LocalGatherOp
-LogicalResult LocalGatherOp::verify() {
-  auto srcTy = getSrc().getType();
-  auto indicesTy = cast<RankedTensorType>(getIndices().getType());
-  auto dstTy = cast<RankedTensorType>(getType());
-  unsigned axis = getAxis();
-
-  // Verify source has shared memory encoding
-  auto srcEnc = srcTy.getEncoding();
-  if (!isa<SharedEncodingTrait>(srcEnc)) {
-    return emitError("source must have shared memory encoding");
-  }
-
-  // Verify indices tensor has integer element type
-  if (!indicesTy.getElementType().isInteger()) {
-    return emitError("indices must have integer element type");
-  }
-
-  // Verify result has the same shape as indices
-  if (dstTy.getShape() != indicesTy.getShape()) {
-    return emitError("result shape must match indices shape");
-  }
-
-  // Verify src and indices have the same rank
-  if (srcTy.getRank() != indicesTy.getRank()) {
-    return emitError("source and indices must have the same rank");
-  }
-
-  // Verify axis is valid
-  if (axis >= srcTy.getRank()) {
-    return emitError("axis ")
-           << axis << " is out of bounds for source rank " << srcTy.getRank();
-  }
-
-  // Verify element types match
-  if (srcTy.getElementType() != dstTy.getElementType()) {
-    return emitError("result element type must match source element type");
-  }
-
-  // Verify indices and result have the same layout
-  if (indicesTy.getEncoding() != dstTy.getEncoding()) {
-    return emitError("indices and result must have the same layout");
-  }
-
-  return success();
-}
-
-// LocalScatterOp
-LogicalResult LocalScatterOp::verify() {
-  auto dstTy = getDst().getType();
-  auto valuesTy = cast<RankedTensorType>(getValues().getType());
-  auto indicesTy = cast<RankedTensorType>(getIndices().getType());
-  unsigned axis = getAxis();
-
-  // Verify destination has shared memory encoding
-  auto dstEnc = dstTy.getEncoding();
-  if (!isa<SharedEncodingTrait>(dstEnc)) {
-    return emitError("destination must have shared memory encoding");
-  }
-
-  // Verify indices tensor has integer element type
-  if (!indicesTy.getElementType().isInteger()) {
-    return emitError("indices must have integer element type");
-  }
-
-  // Verify values and indices have the same shape
-  if (valuesTy.getShape() != indicesTy.getShape()) {
-    return emitError("values shape must match indices shape");
-  }
-
-  // Verify dst and indices have the same rank
-  if (dstTy.getRank() != indicesTy.getRank()) {
-    return emitError("destination and indices must have the same rank");
-  }
-
-  // Verify axis is valid
-  if (axis >= dstTy.getRank()) {
-    return emitError("axis ")
-           << axis << " is out of bounds for destination rank "
-           << dstTy.getRank();
-  }
-
-  // Verify values and indices have the same layout
-  if (valuesTy.getEncoding() != indicesTy.getEncoding()) {
-    return emitError("values must have the same layout as indices");
-  }
-
-  // Verify element types match
-  if (dstTy.getElementType() != valuesTy.getElementType()) {
-    return emitError("values element type must match destination element type");
-  }
-
-  return success();
-}
-
 // AsyncCopyGlobalToLocalOp
 LogicalResult AsyncCopyGlobalToLocalOp::verify() {
   if (!getResult().getType().getMutableMemory())
@@ -910,11 +773,6 @@ LogicalResult MemDescIndexOp::verify() {
     return emitError("src and dst must have the same type of encoding");
   }
 
-  if (dstTy.getAllocShape() != dstTy.getShape() ||
-      srcTy.getAllocShape() != srcTy.getShape()) {
-    return emitError("alloc shape must match shape for both result and src");
-  }
-
   if (isa<triton::nvidia_gpu::TensorMemoryEncodingAttr>(srcEnc)) {
     // We support only 3D -> 2D subviews with only first offset being non-zero.
     if (srcTy.getRank() != 3 || dstTy.getRank() != 2) {
@@ -924,28 +782,6 @@ LogicalResult MemDescIndexOp::verify() {
     return success();
   }
   return success();
-}
-
-OpFoldResult MemDescSubsliceOp::fold(FoldAdaptor adaptor) {
-  // Fold subslice(subslice(x, off1), off2) -> subslice(x, off1 + off2)
-  if (auto srcSubslice = getSrc().getDefiningOp<MemDescSubsliceOp>()) {
-    auto srcOffsets = srcSubslice.getOffsets();
-    auto currOffsets = getOffsets();
-
-    // Compute combined offsets
-    SmallVector<int32_t> combinedOffsets;
-    for (size_t i = 0; i < currOffsets.size(); ++i) {
-      combinedOffsets.push_back(srcOffsets[i] + currOffsets[i]);
-    }
-
-    // Update this operation to point directly to the original source with
-    // combined offsets
-    setOperand(srcSubslice.getSrc());
-    setOffsetsAttr(DenseI32ArrayAttr::get(getContext(), combinedOffsets));
-    return getResult();
-  }
-
-  return {};
 }
 
 LogicalResult MemDescSubsliceOp::verify() {
@@ -997,16 +833,7 @@ LogicalResult MemDescSubsliceOp::verify() {
   }
 
   auto ctx = getContext();
-  LinearLayout ll;
-  if (auto paddedEncoding = dyn_cast<PaddedSharedEncodingAttr>(srcEnc)) {
-    if (paddedEncoding.getRank() < srcTy.getRank()) {
-      return emitError("SubSlice of low rank PaddedSharedEncoding from higher "
-                       "rank tensors is not supported yet");
-    }
-    ll = paddedEncoding.getLinearComponent();
-  } else {
-    ll = triton::gpu::toLinearLayout(srcTy);
-  }
+  auto ll = triton::gpu::toLinearLayout(srcTy);
   // NYI: We don't support non-trivial block dimension for now.
   auto kBlock = mlir::StringAttr::get(getContext(), "block");
   if (ll.getInDimSize(kBlock) != 1) {
@@ -1035,53 +862,21 @@ LogicalResult MemDescSubsliceOp::verify() {
 // -- WarpSpecializeOp --
 
 RegionRange WarpSpecializeOp::getPartitionRegions() {
-  return getPartitionOp().getPartitionRegions();
-}
-
-WarpSpecializePartitionsOp WarpSpecializeOp::getPartitionOp() {
   return cast<WarpSpecializePartitionsOp>(
-      getPartitionOpHolder().front().front());
+             getPartitionOpHolder().front().front())
+      .getPartitionRegions();
 }
 
 void WarpSpecializeOp::getSuccessorRegions(
     RegionBranchPoint src, SmallVectorImpl<RegionSuccessor> &successors) {
-  // The parent branches into the default region and the partition regions.
+  // The parent branches transparently into the default region.
   if (src.isParent()) {
     successors.emplace_back(&getDefaultRegion());
-    successors.emplace_back(&getPartitionOpHolder());
     return;
   }
   // And the default region branches transparently back to the parent.
-  if (src.getTerminatorPredecessorOrNull()->getParentRegion() ==
-      &getDefaultRegion())
-    successors.push_back(RegionSuccessor::parent());
-}
-
-ValueRange WarpSpecializeOp::getSuccessorInputs(RegionSuccessor successor) {
-  // When returning to parent, the successor inputs are the op results.
-  return successor.isParent() ? getResults() : ValueRange();
-}
-
-void WarpSpecializePartitionsOp::getSuccessorRegions(
-    RegionBranchPoint src, SmallVectorImpl<RegionSuccessor> &successors) {
-  // The parent branches to each of the partition regions, but nothing flows out
-  // of the partition regions.
-  if (src.isParent())
-    for (Region &region : getPartitionRegions())
-      successors.emplace_back(&region);
-}
-
-OperandRange
-WarpSpecializePartitionsOp::getEntrySuccessorOperands(RegionSuccessor) {
-  // Pass through the explicit captures from the enclosing WarpSpecializeOp.
-  return getExplicitCaptures();
-}
-
-ValueRange
-WarpSpecializePartitionsOp::getSuccessorInputs(RegionSuccessor successor) {
-  // The successor inputs are the block arguments of the partition region.
-  Region *region = successor.getSuccessor();
-  return region ? region->getArguments() : ValueRange();
+  assert(src.getRegionOrNull() == &getDefaultRegion());
+  successors.push_back(RegionSuccessor(getResults()));
 }
 
 LogicalResult WarpSpecializeOp::verify() {
@@ -1115,6 +910,22 @@ LogicalResult WarpSpecializeOp::verify() {
     }
   }
 
+  for (auto [i, region] : llvm::enumerate(getPartitionRegions())) {
+    if (region->getNumArguments() != getNumOperands()) {
+      return emitOpError("partition region #")
+             << i << " has " << region->getNumArguments()
+             << " arguments but expected " << getNumOperands();
+    }
+    for (auto [argIdx, argType, capType] : llvm::enumerate(
+             region->getArgumentTypes(), getExplicitCaptures().getTypes())) {
+      if (argType == capType)
+        continue;
+      return emitOpError("partition region #")
+             << i << " argument #" << argIdx << " has type " << argType
+             << " but corresponding capture has type " << capType;
+    }
+  }
+
   // This op cannot be nested inside itself.
   if ((*this)->getParentOfType<WarpSpecializeOp>()) {
     return emitOpError(
@@ -1133,38 +944,71 @@ LogicalResult WarpSpecializeOp::verify() {
 LogicalResult WarpSpecializeOp::canonicalize(WarpSpecializeOp op,
                                              PatternRewriter &b) {
   // Propagate unused results and captures by removing them from the op.
+  llvm::BitVector unusedArgs(op.getNumOperands());
   llvm::BitVector unusedResults(op.getNumResults());
   for (auto [i, result] : llvm::enumerate(op.getResults())) {
     if (result.use_empty())
       unusedResults.set(i);
   }
+  // Remove duplicate captures.
+  DenseMap<Value, unsigned> uniqueCaptures;
+  for (auto [i, capture] : llvm::enumerate(op.getExplicitCaptures())) {
+    auto noUseInRegion = [i = i](Region *region) {
+      return region->getArgument(i).use_empty();
+    };
+    if (llvm::all_of(op.getPartitionRegions(), noUseInRegion)) {
+      unusedArgs.set(i);
+      continue;
+    }
 
-  if (unusedResults.none())
-    return failure();
-
-  for (Block &block : op.getDefaultRegion()) {
-    if (auto yield = dyn_cast<WarpYieldOp>(block.getTerminator())) {
-      b.modifyOpInPlace(yield, [&] { yield->eraseOperands(unusedResults); });
+    auto [it, inserted] = uniqueCaptures.try_emplace(capture, i);
+    if (!inserted) {
+      unsigned duplicateIdx = it->second;
+      b.modifyOpInPlace(op, [&, i = i] {
+        for (Region *region : op.getPartitionRegions()) {
+          b.replaceAllUsesWith(region->getArgument(i),
+                               region->getArgument(duplicateIdx));
+        }
+      });
+      unusedArgs.set(i);
     }
   }
+  if (unusedArgs.none() && unusedResults.none())
+    return failure();
 
-  SmallVector<Type> newTypes;
-  for (auto [i, type] : llvm::enumerate(op.getResultTypes())) {
-    if (!unusedResults.test(i))
-      newTypes.push_back(type);
+  if (unusedArgs.any()) {
+    b.modifyOpInPlace(op, [&] {
+      for (Region *region : op.getPartitionRegions())
+        region->front().eraseArguments(unusedArgs);
+      op->eraseOperands(unusedArgs);
+    });
   }
-  OperationState state(op.getLoc(), op->getName(), {}, newTypes,
-                       op->getAttrs());
-  state.addRegion()->takeBody(op.getDefaultRegion());
-  state.addRegion()->takeBody(op.getPartitionOpHolder());
-  auto newOp = cast<WarpSpecializeOp>(b.create(state));
-  unsigned newResultIdx = 0;
-  for (auto [i, result] : llvm::enumerate(op.getResults())) {
-    if (!unusedResults.test(i))
-      result.replaceAllUsesWith(newOp.getResult(newResultIdx++));
+
+  if (unusedResults.any()) {
+    for (Block &block : op.getDefaultRegion()) {
+      if (auto yield = dyn_cast<WarpYieldOp>(block.getTerminator())) {
+        b.modifyOpInPlace(yield, [&] { yield->eraseOperands(unusedResults); });
+      }
+    }
+
+    SmallVector<Type> newTypes;
+    for (auto [i, type] : llvm::enumerate(op.getResultTypes())) {
+      if (!unusedResults.test(i))
+        newTypes.push_back(type);
+    }
+    OperationState state(op.getLoc(), op->getName(), op.getOperands(), newTypes,
+                         op->getAttrs());
+    state.addRegion()->takeBody(op.getDefaultRegion());
+    state.addRegion()->takeBody(op.getPartitionOpHolder());
+    auto newOp = cast<WarpSpecializeOp>(b.create(state));
+    unsigned newResultIdx = 0;
+    for (auto [i, result] : llvm::enumerate(op.getResults())) {
+      if (!unusedResults.test(i))
+        result.replaceAllUsesWith(newOp.getResult(newResultIdx++));
+    }
+    assert(newResultIdx == newOp.getNumResults());
+    b.eraseOp(op);
   }
-  assert(newResultIdx == newOp.getNumResults());
-  b.eraseOp(op);
 
   return success();
 }
@@ -1173,18 +1017,19 @@ void WarpSpecializeOp::build(OpBuilder &builder, OperationState &state,
                              TypeRange resultTypes,
                              ArrayRef<int32_t> partitionNumWarps,
                              unsigned partitionNumRegions) {
-  build(builder, state, resultTypes, partitionNumWarps, {}, {}, {});
+  build(builder, state, resultTypes, /*explicitCaptures=*/ValueRange(),
+        partitionNumWarps, {}, {}, {});
   OpBuilder::InsertionGuard guard(builder);
   Block *container = builder.createBlock(state.regions.back().get());
-  WarpSpecializePartitionsOp::create(builder, state.location,
-                                     /*explicitCaptures=*/ValueRange(),
-                                     partitionNumRegions);
+  builder.create<WarpSpecializePartitionsOp>(state.location,
+                                             partitionNumRegions);
 }
 
 void WarpSpecializeOp::build(OpBuilder &builder, OperationState &state,
-                             TypeRange resultTypes,
+                             TypeRange resultTypes, ValueRange explicitCaptures,
                              ArrayRef<int32_t> partitionNumWarps) {
-  build(builder, state, resultTypes, partitionNumWarps, {}, {}, {});
+  build(builder, state, resultTypes, explicitCaptures, partitionNumWarps, {},
+        {}, {});
 }
 
 ParseResult WarpSpecializeOp::parse(OpAsmParser &p, OperationState &result) {
@@ -1216,7 +1061,7 @@ ParseResult WarpSpecializeOp::parse(OpAsmParser &p, OperationState &result) {
   FunctionType types;
   if (p.parseColon() || p.parseType(types) ||
       p.resolveOperands(operands, types.getInputs(), operandLoc,
-                        partitionOpState.operands))
+                        result.operands))
     return failure();
 
   result.addTypes(types.getResults());
@@ -1232,7 +1077,7 @@ ParseResult WarpSpecializeOp::parse(OpAsmParser &p, OperationState &result) {
 
 void WarpSpecializeOp::print(OpAsmPrinter &p) {
   p << '(';
-  p.printOperands(getPartitionOp().getOperands());
+  p.printOperands(getOperands());
   p << ')';
   p.printOptionalAttrDictWithKeyword(getOperation()->getAttrs(),
                                      {getPartitionNumWarpsAttrName()});
@@ -1252,69 +1097,7 @@ void WarpSpecializeOp::print(OpAsmPrinter &p) {
     p.printRegion(*region, /*printEntryBlockArgs=*/false);
   }
   p << " : ";
-  SmallVector<Type> captureTypes;
-  for (auto val : getPartitionOp().getExplicitCaptures())
-    captureTypes.push_back(val.getType());
-  p.printFunctionalType(captureTypes, getResultTypes());
-}
-
-LogicalResult WarpSpecializePartitionsOp::verify() {
-  for (auto [i, region] : llvm::enumerate(getPartitionRegions())) {
-    if (region.getNumArguments() != getNumOperands()) {
-      return emitOpError("partition region #")
-             << i << " has " << region.getNumArguments()
-             << " arguments but expected " << getNumOperands();
-    }
-    for (auto [argIdx, argType, capType] : llvm::enumerate(
-             region.getArgumentTypes(), getExplicitCaptures().getTypes())) {
-      if (argType == capType)
-        continue;
-      return emitOpError("partition region #")
-             << i << " argument #" << argIdx << " has type " << argType
-             << " but corresponding capture has type " << capType;
-    }
-  }
-  return success();
-}
-
-LogicalResult
-WarpSpecializePartitionsOp::canonicalize(WarpSpecializePartitionsOp op,
-                                         PatternRewriter &b) {
-  llvm::BitVector unusedArgs(op.getNumOperands());
-
-  // Remove duplicate captures.
-  DenseMap<Value, unsigned> uniqueCaptures;
-  for (auto [i, capture] : llvm::enumerate(op.getExplicitCaptures())) {
-    auto noUseInRegion = [i = i](Region &region) {
-      return region.getArgument(i).use_empty();
-    };
-    if (llvm::all_of(op.getPartitionRegions(), noUseInRegion)) {
-      unusedArgs.set(i);
-      continue;
-    }
-
-    auto [it, inserted] = uniqueCaptures.try_emplace(capture, i);
-    if (!inserted) {
-      unsigned duplicateIdx = it->second;
-      b.modifyOpInPlace(op, [&, i = i] {
-        for (Region &region : op.getPartitionRegions()) {
-          b.replaceAllUsesWith(region.getArgument(i),
-                               region.getArgument(duplicateIdx));
-        }
-      });
-      unusedArgs.set(i);
-    }
-  }
-
-  if (unusedArgs.none())
-    return failure();
-
-  b.modifyOpInPlace(op, [&] {
-    for (Region &region : op.getPartitionRegions())
-      region.front().eraseArguments(unusedArgs);
-    op->eraseOperands(unusedArgs);
-  });
-  return success();
+  p.printFunctionalType(*this);
 }
 
 LogicalResult WarpYieldOp::verify() {
@@ -1353,7 +1136,7 @@ static size_t getSharedMemorySize(Type type) {
 std::pair<uint64_t, uint64_t> WarpSpecializeOp::getCaptureSizeAlign() {
   uint64_t captureSize = 0;
   // Tightly pack the captures in memory.
-  for (Type type : getPartitionOp().getOperandTypes()) {
+  for (Type type : getOperandTypes()) {
     captureSize += getSharedMemorySize(type);
   }
   // Align the captures to 8 bytes.
@@ -1363,53 +1146,6 @@ std::pair<uint64_t, uint64_t> WarpSpecializeOp::getCaptureSizeAlign() {
 unsigned WarpSpecializeOp::getTotalPartitionWarps() {
   ArrayRef<int32_t> numWarps = getPartitionNumWarps();
   return std::accumulate(numWarps.begin(), numWarps.end(), 0);
-}
-
-//===----------------------------------------------------------------------===//
-// BarrierOp
-//===----------------------------------------------------------------------===//
-
-void BarrierOp::print(OpAsmPrinter &p) {
-  // print "all" instead of  "local|global_read|global_write|tensor|all"
-  if (getAddrSpace() == AddrSpace::All) {
-    p << " all";
-  } else {
-    p << ' ' << stringifyAddrSpace(getAddrSpace());
-  }
-}
-
-ParseResult BarrierOp::parse(OpAsmParser &parser, OperationState &result) {
-  auto parseAddrSpace = [&]() -> FailureOr<AddrSpace> {
-    std::string keyword;
-    if (parser.parseKeywordOrString(&keyword))
-      return failure();
-
-    auto addrSpace = symbolizeAddrSpace(keyword);
-    if (!addrSpace)
-      return parser.emitError(parser.getCurrentLocation())
-             << "unknown addrSpace '" << keyword << "'";
-
-    return *addrSpace;
-  };
-
-  auto addrSpace = parseAddrSpace();
-  if (failed(addrSpace))
-    return failure();
-
-  AddrSpace addrSpaceRet = *addrSpace;
-
-  while (succeeded(parser.parseOptionalVerticalBar())) {
-    addrSpace = parseAddrSpace();
-    if (failed(addrSpace))
-      return failure();
-
-    addrSpaceRet = bitEnumSet(addrSpaceRet, *addrSpace);
-  }
-
-  result.addAttribute("addrSpace",
-                      AddrSpaceAttr::get(parser.getContext(), addrSpaceRet));
-
-  return success();
 }
 
 } // namespace mlir::triton::gpu

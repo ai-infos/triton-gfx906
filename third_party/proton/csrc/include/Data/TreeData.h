@@ -3,13 +3,8 @@
 
 #include "Context/Context.h"
 #include "Data.h"
-#include "nlohmann/json.hpp"
 #include <stdexcept>
-#include <string>
 #include <unordered_map>
-#include <vector>
-
-using json = nlohmann::json;
 
 namespace proton {
 
@@ -20,22 +15,17 @@ public:
 
   TreeData(const std::string &path) : TreeData(path, nullptr) {}
 
-  std::string toJsonString(size_t phase) const override;
+  size_t addOp(size_t scopeId, const std::string &name) override;
 
-  std::vector<uint8_t> toMsgPack(size_t phase) const override;
+  size_t addOp(size_t scopeId, const std::vector<Context> &contexts) override;
 
-  DataEntry addOp(const std::string &name) override;
-
-  DataEntry addOp(size_t phase, size_t contextId,
-                  const std::vector<Context> &contexts) override;
+  void addMetric(size_t scopeId, std::shared_ptr<Metric> metric) override;
 
   void
   addMetrics(size_t scopeId,
              const std::map<std::string, MetricValueType> &metrics) override;
 
-  void
-  addMetrics(size_t phase, size_t entryId,
-             const std::map<std::string, MetricValueType> &metrics) override;
+  void clear() override;
 
 protected:
   // ScopeInterface
@@ -44,25 +34,19 @@ protected:
   void exitScope(const Scope &scope) override;
 
 private:
-  // `tree` and `scopeIdToContextId` can be accessed by both the user thread and
-  // the background threads concurrently, so methods that access them should be
-  // protected by a (shared) mutex.
-  class Tree;
-  json buildHatchetJson(TreeData::Tree *tree) const;
-  std::vector<uint8_t> buildHatchetMsgPack(TreeData::Tree *tree) const;
+  void dumpHatchet(std::ostream &os) const;
 
-  // Data
-  void doDump(std::ostream &os, OutputFormat outputFormat,
-              size_t phase) const override;
+  void doDump(std::ostream &os, OutputFormat outputFormat) const override;
 
   OutputFormat getDefaultOutputFormat() const override {
     return OutputFormat::Hatchet;
   }
 
-  void dumpHatchet(std::ostream &os, size_t phase) const;
-  void dumpHatchetMsgPack(std::ostream &os, size_t phase) const;
-
-  PhaseStore<Tree> treePhases;
+  // `tree` and `scopeIdToContextId` can be accessed by both the user thread and
+  // the background threads concurrently, so methods that access them should be
+  // protected by a (shared) mutex.
+  class Tree;
+  std::unique_ptr<Tree> tree;
   // ScopeId -> ContextId
   std::unordered_map<size_t, size_t> scopeIdToContextId;
 };

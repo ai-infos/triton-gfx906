@@ -74,26 +74,26 @@ usePermlaneSwapToOptimizeStore(PatternRewriter &rewriter, Value ptr, Value val,
     return nullptr;
 
   Attribute newEncoding = triton::gpu::LinearEncodingAttr::get(
-      oldStoreOp.getContext(), std::move(storeLL.value()));
+      oldStoreOp.getContext(), storeLL.value());
   auto newPtrType = ptrType.cloneWithEncoding(newEncoding);
-  Value newPtr = triton::gpu::ConvertLayoutOp::create(rewriter, ptr.getLoc(),
-                                                      newPtrType, ptr);
+  Value newPtr = rewriter.create<triton::gpu::ConvertLayoutOp>(ptr.getLoc(),
+                                                               newPtrType, ptr);
 
   auto newValType = valType.cloneWithEncoding(newEncoding);
-  Value newVal = triton::gpu::ConvertLayoutOp::create(rewriter, val.getLoc(),
-                                                      newValType, val);
+  Value newVal = rewriter.create<triton::gpu::ConvertLayoutOp>(val.getLoc(),
+                                                               newValType, val);
 
   Value newMask = mask;
   if (mask) {
     auto maskType = dyn_cast<RankedTensorType>(mask.getType());
     auto newMaskType = maskType.cloneWithEncoding(newEncoding);
-    newMask = triton::gpu::ConvertLayoutOp::create(rewriter, mask.getLoc(),
-                                                   newMaskType, mask);
+    newMask = rewriter.create<triton::gpu::ConvertLayoutOp>(mask.getLoc(),
+                                                            newMaskType, mask);
   }
 
-  return triton::StoreOp::create(rewriter, oldStoreOp.getLoc(), newPtr, newVal,
-                                 newMask, oldStoreOp.getCache(),
-                                 oldStoreOp.getEvict());
+  return rewriter.create<triton::StoreOp>(oldStoreOp.getLoc(), newPtr, newVal,
+                                          newMask, oldStoreOp.getCache(),
+                                          oldStoreOp.getEvict());
 }
 
 // convert(val) : xmma -> blocked
@@ -161,8 +161,8 @@ public:
         cast<RankedTensorType>(cvtOp.getSrc().getType()).getEncoding();
 
     auto newPtrType = ptrType.cloneWithEncoding(newEncoding);
-    Value newPtr = triton::gpu::ConvertLayoutOp::create(rewriter, ptr.getLoc(),
-                                                        newPtrType, ptr);
+    Value newPtr = rewriter.create<triton::gpu::ConvertLayoutOp>(
+        ptr.getLoc(), newPtrType, ptr);
 
     auto newVal = cvtOp.getSrc();
 
@@ -181,15 +181,15 @@ public:
     if (mask) {
       auto maskType = dyn_cast<RankedTensorType>(mask.getType());
       auto newMaskType = maskType.cloneWithEncoding(newEncoding);
-      newMask = triton::gpu::ConvertLayoutOp::create(rewriter, mask.getLoc(),
-                                                     newMaskType, mask);
+      newMask = rewriter.create<triton::gpu::ConvertLayoutOp>(
+          mask.getLoc(), newMaskType, mask);
     }
     triton::StoreOp newStoreOp =
         usePermlaneSwapToOptimizeStore(rewriter, newPtr, newVal, newMask, stOp);
     if (!newStoreOp) {
-      newStoreOp =
-          triton::StoreOp::create(rewriter, stOp.getLoc(), newPtr, newVal,
-                                  newMask, stOp.getCache(), stOp.getEvict());
+      newStoreOp = rewriter.create<triton::StoreOp>(
+          stOp.getLoc(), newPtr, newVal, newMask, stOp.getCache(),
+          stOp.getEvict());
     }
 
     rewriter.replaceOp(stOp, newStoreOp);
