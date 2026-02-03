@@ -1,12 +1,7 @@
 #pragma once
 #include "mlir/IR/Builders.h"
 #include "triton/Tools/Sys/GetEnv.hpp"
-#include "llvm/ADT/ArrayRef.h"
 #include <memory>
-
-typedef int AsyncTaskId;
-void setAsyncTaskIds(mlir::Operation *op,
-                     llvm::ArrayRef<AsyncTaskId> asyncTaskIds);
 
 // A custom op builder that keeps track of the last location
 class TritonOpBuilder {
@@ -40,7 +35,7 @@ public:
     if (!block.empty())
       setLastLoc(block.begin()->getLoc());
     else
-      setLastLoc(builder->getUnknownLoc());
+      setLastLoc(getLocForBlock(&block));
     builder->setInsertionPointToStart(&block);
   }
 
@@ -48,7 +43,7 @@ public:
     if (!block.empty())
       setLastLoc(block.back().getLoc());
     else
-      setLastLoc(builder->getUnknownLoc());
+      setLastLoc(getLocForBlock(&block));
     builder->setInsertionPointToEnd(&block);
   }
 
@@ -58,19 +53,20 @@ public:
   }
 
   void restoreInsertionPoint(mlir::OpBuilder::InsertPoint pt) {
-    if (pt.isSet() && pt.getPoint() != pt.getBlock()->end())
-      setLastLoc(pt.getPoint()->getLoc());
-    else
-      setLastLoc(builder->getUnknownLoc());
+    setLastLoc(builder->getUnknownLoc());
+    if (pt.isSet()) {
+      if (pt.getPoint() != pt.getBlock()->end())
+        setLastLoc(pt.getPoint()->getLoc());
+      else
+        setLastLoc(getLocForBlock(pt.getBlock()));
+    }
+
     builder->restoreInsertionPoint(pt);
   }
 
   template <typename OpTy, typename... Args> OpTy create(Args &&...args) {
     auto loc = getLastLoc();
-    auto ret = builder->create<OpTy>(loc, std::forward<Args>(args)...);
-    if (asyncTaskIds)
-      ::setAsyncTaskIds(ret, *asyncTaskIds);
-    return ret;
+    return OpTy::create(*builder, loc, std::forward<Args>(args)...);
   }
 
   // Overload to create or fold a single result operation.
@@ -90,16 +86,15 @@ public:
     return builder->createOrFold<OpTy>(loc, std::forward<Args>(args)...);
   }
 
-  void setAsyncTaskIds(std::vector<int> taskIds) {
-    this->asyncTaskIds = taskIds;
-  }
-
-  void unsetAsyncTaskIds() { this->asyncTaskIds = std::nullopt; }
-
 private:
   std::unique_ptr<mlir::OpBuilder> builder;
   std::unique_ptr<mlir::Location> lastLoc;
-  std::optional<std::vector<int>> asyncTaskIds;
   bool lineInfoEnabled =
       !mlir::triton::tools::getBoolEnv("TRITON_DISABLE_LINE_INFO");
+
+  mlir::Location getLocForBlock(mlir::Block *block) {
+    if (auto parentOp = block->getParentOp())
+      return parentOp->getLoc();
+    return builder->getUnknownLoc();
+  }
 };

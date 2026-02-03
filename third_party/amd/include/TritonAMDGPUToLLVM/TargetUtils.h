@@ -8,7 +8,6 @@ namespace mlir::triton::AMD {
 // A list of ISA families we care about.
 enum class ISAFamily {
   Unknown,
-  VEGA20,
   CDNA1,
   CDNA2,
   CDNA3,
@@ -16,6 +15,8 @@ enum class ISAFamily {
   RDNA1,
   RDNA2,
   RDNA3,
+  RDNA4,
+  GFX1250,
 };
 
 // Deduces the corresponding ISA family for the given target gfx |arch|.
