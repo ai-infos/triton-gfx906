@@ -22,6 +22,8 @@ ISAFamily deduceISAFamily(llvm::StringRef arch) {
     return ISAFamily::CDNA2;
   case llvm::AMDGPU::GK_GFX908:
     return ISAFamily::CDNA1;
+  case llvm::AMDGPU::GK_GFX906:
+    return ISAFamily::VEGA20;
   default:
     break;
   }
@@ -41,6 +43,7 @@ ISAFamily deduceISAFamily(llvm::StringRef arch) {
 
 bool supportsVDot(llvm::StringRef arch) {
   switch (deduceISAFamily(arch)) {
+  case AMD::ISAFamily::VEGA20:
   case AMD::ISAFamily::CDNA1:
   case AMD::ISAFamily::CDNA2:
   case AMD::ISAFamily::CDNA3:
@@ -57,6 +60,7 @@ bool supportsVDot(llvm::StringRef arch) {
 
 bool isCDNA(ISAFamily isaFamily) {
   switch (isaFamily) {
+  case AMD::ISAFamily::VEGA20:
   case ISAFamily::CDNA1:
   case ISAFamily::CDNA2:
   case ISAFamily::CDNA3:
